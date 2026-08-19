@@ -3,5 +3,37 @@
 version = 4
 
 [[package]]
-name = "bpp-dataset-gen"
+name = "bpp-assets"
+version = "0.1.0"
+
+[[package]]
+name = "bpp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bpp-core"
+version = "0.1.0"
+
+[[package]]
+name = "bpp-dataset"
+version = "0.1.0"
+
+[[package]]
+name = "bpp-physics-rapier"
+version = "0.1.0"
+
+[[package]]
+name = "bpp-pipeline"
+version = "0.1.0"
+
+[[package]]
+name = "bpp-render-blenderproc"
+version = "0.1.0"
+
+[[package]]
+name = "bpp-render-wgpu"
+version = "0.1.0"
+
+[[package]]
+name = "xtask"
 version = "0.1.0"
