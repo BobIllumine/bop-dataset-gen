@@ -2,6 +2,7 @@
 
 mod appearances;
 mod cameras;
+mod distributions;
 mod identifiers;
 mod render_reports;
 mod render_requests;
@@ -16,6 +17,10 @@ pub use appearances::{
 pub use cameras::{
     CameraIntrinsics, CameraSnapshot, ImageSize, InvalidCameraIntrinsicsError,
     InvalidCameraSnapshotError, InvalidImageSizeError,
+};
+pub use distributions::{
+    Distribution, DistributionView, InvalidDistributionError, InvalidWeightedValueError,
+    UniformBound, UniformSemantics, WeightedValue,
 };
 pub use identifiers::{
     AssetId, AttemptId, CameraId, InstanceId, InvalidAssetIdError, InvalidInstanceIdError,
