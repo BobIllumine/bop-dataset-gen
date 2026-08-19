@@ -213,6 +213,15 @@ fn float_distributions_validate_values_and_report_interval_semantics() {
             semantics: UniformSemantics::Fixed,
         } if min.to_bits() == 3.0_f32.to_bits() && max.to_bits() == 3.0_f32.to_bits()
     ));
+    assert_eq!(
+        serde_json::from_str::<Distribution<f32>>(r#"{"kind":"uniform","min":3.0,"max":3.0}"#,)
+            .unwrap(),
+        equal
+    );
+    assert_eq!(
+        toml::from_str::<Distribution<f32>>("kind = \"uniform\"\nmin = 3.0\nmax = 3.0\n").unwrap(),
+        equal
+    );
 
     for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
         assert!(matches!(
@@ -300,6 +309,20 @@ fn choices_reject_empty_all_zero_and_nonfinite_values_but_allow_mixed_zero_weigh
                 && values[0].weight().to_bits() == 0.0_f64.to_bits()
                 && values[1].weight().to_bits() == 1.0_f64.to_bits()
     ));
+    assert_eq!(
+        serde_json::from_str::<Distribution<f32>>(
+            r#"{"kind":"choice","values":[{"value":1.0,"weight":0.0},{"value":2.0,"weight":1.0}]}"#,
+        )
+        .unwrap(),
+        choice
+    );
+    assert_eq!(
+        toml::from_str::<Distribution<f32>>(
+            "kind = \"choice\"\nvalues = [{ value = 1.0, weight = 0.0 }, { value = 2.0, weight = 1.0 }]\n",
+        )
+        .unwrap(),
+        choice
+    );
 
     for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
         assert!(matches!(
