@@ -4,6 +4,13 @@ use bpp_core::{
     CameraExtrinsics, CameraId, CameraIntrinsics, CameraSnapshot, ImageSize,
     InvalidCameraSnapshotError, PositiveMeters, RigidTransform, SchemaVersion,
 };
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CameraEnvelope {
+    camera: CameraSnapshot,
+}
 
 fn assert_same_float(actual: f32, expected: f32) {
     assert_eq!(actual.to_bits(), expected.to_bits());
@@ -174,4 +181,18 @@ fn camera_snapshot_rejects_depth_order_unknown_fields_and_nested_schema_version_
         ))
         .is_err()
     );
+}
+
+#[test]
+fn camera_snapshot_rejects_schema_version_two_when_nested_in_an_envelope() {
+    let snapshot = valid_snapshot();
+    let valid = format!(
+        r#"{{"camera":{}}}"#,
+        serde_json::to_string(&snapshot).unwrap()
+    );
+    let envelope: CameraEnvelope = serde_json::from_str(&valid).unwrap();
+    assert_eq!(envelope.camera, snapshot);
+
+    let invalid = valid.replacen("\"schema_version\":1", "\"schema_version\":2", 1);
+    assert!(serde_json::from_str::<CameraEnvelope>(&invalid).is_err());
 }
