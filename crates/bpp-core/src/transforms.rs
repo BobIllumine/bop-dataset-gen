@@ -1,4 +1,9 @@
+use std::fmt;
+
 use glam::{Quat, Vec3, Vec4};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer, de::Error as _, ser::SerializeStruct,
+};
 
 /// A finite signed distance measured in metres.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -19,6 +24,25 @@ impl Meters {
 
     const fn from_finite(value: f32) -> Self {
         Self(canonicalize_zero(value))
+    }
+}
+
+impl Serialize for Meters {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Meters {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(f32::deserialize(deserializer)?)
+            .ok_or_else(|| D::Error::custom("metre values must be finite"))
     }
 }
 
@@ -108,6 +132,49 @@ impl RigidTransform {
     }
 }
 
+/// Error returned when a rigid transform has invalid finite components or rotation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidRigidTransformError;
+
+impl fmt::Display for InvalidRigidTransformError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .write_str("rigid transform requires finite translation and a finite nonzero rotation")
+    }
+}
+
+impl std::error::Error for InvalidRigidTransformError {}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RigidTransformWire {
+    translation: [f32; 3],
+    rotation_xyzw: [f32; 4],
+}
+
+impl Serialize for RigidTransform {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("RigidTransform", 2)?;
+        state.serialize_field("translation", &self.translation)?;
+        state.serialize_field("rotation_xyzw", &self.rotation_xyzw)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for RigidTransform {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = RigidTransformWire::deserialize(deserializer)?;
+        Self::try_new(wire.translation, wire.rotation_xyzw)
+            .ok_or_else(|| D::Error::custom(InvalidRigidTransformError))
+    }
+}
+
 /// Returns the fixed basis transform from a local right-handed Z-up camera
 /// frame into `OpenCV` camera coordinates.
 ///
@@ -189,6 +256,33 @@ impl CameraExtrinsics {
     #[must_use]
     pub fn camera_to_world(self, camera_point: [Meters; 3]) -> Option<[Meters; 3]> {
         self.world_from_camera()?.transform_point(camera_point)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CameraExtrinsicsWire {
+    camera_from_world: RigidTransform,
+}
+
+impl Serialize for CameraExtrinsics {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("CameraExtrinsics", 1)?;
+        state.serialize_field("camera_from_world", &self.camera_from_world)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for CameraExtrinsics {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = CameraExtrinsicsWire::deserialize(deserializer)?;
+        Ok(Self::new(wire.camera_from_world))
     }
 }
 

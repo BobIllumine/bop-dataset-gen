@@ -3,5 +3,10 @@
 mod identifiers;
 mod transforms;
 
-pub use identifiers::{AssetId, AttemptId, CameraId, InstanceId, SceneId};
-pub use transforms::{CameraExtrinsics, Meters, RigidTransform, z_up_camera_to_opencv};
+pub use identifiers::{
+    AssetId, AttemptId, CameraId, InstanceId, InvalidAssetIdError, InvalidInstanceIdError,
+    InvalidSchemaVersionError, SceneId, SchemaVersion,
+};
+pub use transforms::{
+    CameraExtrinsics, InvalidRigidTransformError, Meters, RigidTransform, z_up_camera_to_opencv,
+};
