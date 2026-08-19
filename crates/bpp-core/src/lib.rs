@@ -3,6 +3,7 @@
 mod appearances;
 mod cameras;
 mod identifiers;
+mod render_reports;
 mod render_requests;
 mod scenes;
 mod transforms;
@@ -19,6 +20,10 @@ pub use cameras::{
 pub use identifiers::{
     AssetId, AttemptId, CameraId, InstanceId, InvalidAssetIdError, InvalidInstanceIdError,
     InvalidSchemaVersionError, SceneId, SchemaVersion,
+};
+pub use render_reports::{
+    BackendInfo, BackendKind, InvalidBackendInfoError, RenderReport, RenderStageTimings,
+    RendererCapabilities,
 };
 pub use render_requests::{
     InvalidRenderChannelsError, InvalidRenderSceneRequestError, RenderChannels, RenderSceneRequest,
