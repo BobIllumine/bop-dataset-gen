@@ -108,6 +108,90 @@ impl RigidTransform {
     }
 }
 
+/// Returns the fixed basis transform from a local right-handed Z-up camera
+/// frame into `OpenCV` camera coordinates.
+///
+/// The source frame has +X right, +Y forward, and +Z up. `OpenCV` coordinates
+/// have +X right, +Y down, and +Z forward, so this maps `[x, y, z]` to
+/// `[x, -z, y]` without translation.
+///
+/// # Panics
+///
+/// Panics if the fixed finite nonzero rotation cannot be constructed. This
+/// indicates a defect in this crate.
+#[must_use]
+pub fn z_up_camera_to_opencv() -> RigidTransform {
+    RigidTransform::try_new([0.0, 0.0, 0.0], [0.5_f32.sqrt(), 0.0, 0.0, 0.5_f32.sqrt()])
+        .expect("fixed Z-up-to-OpenCV basis is a finite nonzero rotation")
+}
+
+/// Camera pose conversions between canonical world coordinates and `OpenCV`
+/// camera coordinates.
+///
+/// The stored transform maps a world point directly into the `OpenCV` camera
+/// frame, whose axes are +X right, +Y down, and +Z forward.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CameraExtrinsics {
+    camera_from_world: RigidTransform,
+}
+
+impl CameraExtrinsics {
+    /// Creates camera extrinsics from a transform mapping world coordinates to
+    /// `OpenCV` camera coordinates.
+    #[must_use]
+    pub const fn new(camera_from_world: RigidTransform) -> Self {
+        Self { camera_from_world }
+    }
+
+    /// Creates camera extrinsics from a world transform of a local Z-up camera.
+    ///
+    /// `world_from_z_up_camera` maps from a local right-handed Z-up camera
+    /// frame (+X right, +Y forward, +Z up) into canonical world coordinates.
+    /// The result maps world points directly into `OpenCV` camera coordinates.
+    /// Returns `None` when inversion or composition cannot produce a finite
+    /// rigid transform.
+    #[must_use]
+    pub fn try_from_world_from_z_up_camera(world_from_z_up_camera: RigidTransform) -> Option<Self> {
+        let z_up_camera_from_world = world_from_z_up_camera.inverse()?;
+        let camera_from_world = z_up_camera_to_opencv().compose(z_up_camera_from_world)?;
+        Some(Self::new(camera_from_world))
+    }
+
+    /// Returns the transform mapping canonical world coordinates to `OpenCV`
+    /// camera coordinates.
+    #[must_use]
+    pub const fn camera_from_world(self) -> RigidTransform {
+        self.camera_from_world
+    }
+
+    /// Returns the transform mapping `OpenCV` camera coordinates to canonical
+    /// world coordinates.
+    ///
+    /// Returns `None` if the inverse cannot be represented with finite values.
+    #[must_use]
+    pub fn world_from_camera(self) -> Option<RigidTransform> {
+        self.camera_from_world.inverse()
+    }
+
+    /// Converts a canonical world point into `OpenCV` camera coordinates.
+    ///
+    /// Returns `None` if the transformed point cannot be represented with
+    /// finite metre components.
+    #[must_use]
+    pub fn world_to_camera(self, world_point: [Meters; 3]) -> Option<[Meters; 3]> {
+        self.camera_from_world.transform_point(world_point)
+    }
+
+    /// Converts an `OpenCV` camera point into canonical world coordinates.
+    ///
+    /// Returns `None` if either the inverse transform or transformed point
+    /// cannot be represented with finite metre components.
+    #[must_use]
+    pub fn camera_to_world(self, camera_point: [Meters; 3]) -> Option<[Meters; 3]> {
+        self.world_from_camera()?.transform_point(camera_point)
+    }
+}
+
 fn normalize_rotation(rotation_xyzw: [f32; 4]) -> Option<[f32; 4]> {
     if !rotation_xyzw.into_iter().all(f32::is_finite) {
         return None;

@@ -1,6 +1,6 @@
 //! Behavioral tests for public metre and rigid-transform contracts.
 
-use bpp_core::{Meters, RigidTransform};
+use bpp_core::{CameraExtrinsics, Meters, RigidTransform, z_up_camera_to_opencv};
 
 const TOLERANCE: f32 = 1.0e-5;
 
@@ -141,5 +141,124 @@ fn point_transformation_rejects_nonfinite_results() {
         transform
             .transform_point(metres([f32::MAX, 0.0, 0.0]))
             .is_none()
+    );
+}
+
+#[test]
+fn z_up_camera_basis_maps_points_to_opencv_coordinates() {
+    let basis = z_up_camera_to_opencv();
+
+    assert_point_approx_eq(
+        basis
+            .transform_point(metres([1.0, 2.0, 3.0]))
+            .expect("finite basis result"),
+        [1.0, -3.0, 2.0],
+    );
+}
+
+#[test]
+fn z_up_camera_basis_inverse_round_trips_a_point() {
+    let point = metres([1.0, 2.0, 3.0]);
+    let basis = z_up_camera_to_opencv();
+    let inverse = basis.inverse().expect("finite basis inverse");
+
+    let opencv_point = basis.transform_point(point).expect("finite basis result");
+
+    assert_point_approx_eq(
+        inverse
+            .transform_point(opencv_point)
+            .expect("finite inverse result"),
+        [1.0, 2.0, 3.0],
+    );
+}
+
+#[test]
+fn camera_extrinsics_map_world_points_for_an_identity_z_up_camera_pose() {
+    let world_from_z_up_camera = RigidTransform::try_new([0.0, -2.0, 1.0], [0.0, 0.0, 0.0, 1.0])
+        .expect("finite camera pose");
+    let extrinsics = CameraExtrinsics::try_from_world_from_z_up_camera(world_from_z_up_camera)
+        .expect("finite camera extrinsics");
+
+    assert_point_approx_eq(
+        extrinsics
+            .world_to_camera(metres([2.0, 1.0, 5.0]))
+            .expect("finite camera point"),
+        [2.0, -4.0, 3.0],
+    );
+}
+
+#[test]
+fn camera_extrinsics_round_trip_world_and_camera_points() {
+    let camera_from_world =
+        RigidTransform::try_new([0.0, 1.0, 2.0], [0.5_f32.sqrt(), 0.0, 0.0, 0.5_f32.sqrt()])
+            .expect("finite camera transform");
+    let extrinsics = CameraExtrinsics::new(camera_from_world);
+    let world_point = metres([2.0, 1.0, 5.0]);
+
+    let camera_point = extrinsics
+        .world_to_camera(world_point)
+        .expect("finite camera point");
+
+    assert_point_approx_eq(
+        extrinsics
+            .camera_to_world(camera_point)
+            .expect("finite world point"),
+        [2.0, 1.0, 5.0],
+    );
+}
+
+#[test]
+fn camera_extrinsics_constructors_produce_equivalent_camera_transforms() {
+    let world_from_z_up_camera = RigidTransform::try_new([0.0, -2.0, 1.0], [0.0, 0.0, 0.0, 1.0])
+        .expect("finite camera pose");
+    let explicit_camera_from_world =
+        RigidTransform::try_new([0.0, 1.0, 2.0], [0.5_f32.sqrt(), 0.0, 0.0, 0.5_f32.sqrt()])
+            .expect("finite camera transform");
+
+    let explicit = CameraExtrinsics::new(explicit_camera_from_world);
+    let derived = CameraExtrinsics::try_from_world_from_z_up_camera(world_from_z_up_camera)
+        .expect("finite camera extrinsics");
+
+    assert_point_approx_eq(
+        explicit
+            .camera_from_world()
+            .transform_point(metres([2.0, 1.0, 5.0]))
+            .expect("finite explicit result"),
+        [2.0, -4.0, 3.0],
+    );
+    assert_point_approx_eq(
+        derived
+            .camera_from_world()
+            .transform_point(metres([2.0, 1.0, 5.0]))
+            .expect("finite derived result"),
+        [2.0, -4.0, 3.0],
+    );
+    for (explicit, derived) in explicit
+        .camera_from_world()
+        .translation()
+        .into_iter()
+        .zip(derived.camera_from_world().translation())
+    {
+        assert_approx_eq(explicit.get(), derived.get());
+    }
+    assert_rotation_approx_eq(
+        explicit.camera_from_world().rotation_xyzw(),
+        derived.camera_from_world().rotation_xyzw(),
+    );
+    assert_point_approx_eq(
+        explicit
+            .world_from_camera()
+            .expect("finite explicit inverse")
+            .transform_point(metres([2.0, -4.0, 3.0]))
+            .expect("finite explicit inverse point"),
+        [2.0, 1.0, 5.0],
+    );
+    assert_point_approx_eq(
+        derived
+            .world_from_camera()
+            .expect("finite derived inverse")
+            .transform_point(metres([2.0, -4.0, 3.0]))
+            .expect("finite derived inverse point"),
+        [2.0, 1.0, 5.0],
     );
 }

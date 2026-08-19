@@ -4,4 +4,4 @@ mod identifiers;
 mod transforms;
 
 pub use identifiers::{AssetId, AttemptId, CameraId, InstanceId, SceneId};
-pub use transforms::{Meters, RigidTransform};
+pub use transforms::{CameraExtrinsics, Meters, RigidTransform, z_up_camera_to_opencv};
