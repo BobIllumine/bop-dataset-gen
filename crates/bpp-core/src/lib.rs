@@ -2,4 +2,4 @@
 
 mod identifiers;
 
-pub use identifiers::InstanceId;
+pub use identifiers::{AssetId, AttemptId, CameraId, InstanceId, SceneId};
