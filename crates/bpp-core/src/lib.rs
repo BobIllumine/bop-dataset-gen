@@ -2,6 +2,7 @@
 
 mod appearances;
 mod cameras;
+mod deterministic_planning;
 mod distributions;
 mod identifiers;
 mod render_reports;
@@ -19,6 +20,9 @@ pub use appearances::{
 pub use cameras::{
     CameraIntrinsics, CameraSnapshot, ImageSize, InvalidCameraIntrinsicsError,
     InvalidCameraSnapshotError, InvalidImageSizeError,
+};
+pub use deterministic_planning::{
+    InvalidScenePlanError, SceneJob, ScenePlanIter, SeedDeriver, SeedStage,
 };
 pub use distributions::{
     Distribution, DistributionView, InvalidDistributionError, InvalidWeightedValueError,
