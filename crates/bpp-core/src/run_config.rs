@@ -7,11 +7,15 @@ use thiserror::Error;
 
 use crate::run_config_wire::{
     AmbientWire, AppearanceWire, AssetWire, BinWire, BlenderProcRendererWire, CameraPoseWire,
-    CameraProjectionWire, CameraWire, DirectionalLightWire, DistributionWire, ImageSizeWire,
-    OutputWire, PbrMaterialWire, PhysicalPropertyDistributionsWire, PhysicsWire, PointLightWire,
-    PopulationWire, RenderersWire, RunConfigWire, RunWire, ShellCameraPoseWire, SpawnVolumeWire,
-    SurfacePhysicalPropertiesWire, TransformWire, VhacdWire, WgpuAdapterPreferenceWire,
-    WgpuDevicePreferenceWire, WgpuRendererWire,
+    CameraProjectionWire, CameraWire, DEFAULT_ANGULAR_SLEEP_THRESHOLD_RAD_S,
+    DEFAULT_FIXED_TIMESTEP_S, DEFAULT_LINEAR_SLEEP_THRESHOLD_MPS, DEFAULT_MAX_STEPS,
+    DEFAULT_MIN_STEPS, DEFAULT_PLACEMENT_ATTEMPT_LIMIT, DEFAULT_REQUIRED_STABLE_CHECKS,
+    DEFAULT_SCENE_ATTEMPT_LIMIT, DEFAULT_STABILITY_CHECK_INTERVAL, DirectionalLightWire,
+    DistributionWire, ImageSizeWire, OutputWire, PbrMaterialWire,
+    PhysicalPropertyDistributionsWire, PhysicsWire, PointLightWire, PopulationWire, RenderersWire,
+    RunConfigWire, RunWire, ShellCameraPoseWire, SpawnVolumeWire, SurfacePhysicalPropertiesWire,
+    TransformWire, VhacdWire, WgpuAdapterPreferenceWire, WgpuDevicePreferenceWire,
+    WgpuRendererWire,
 };
 use crate::{
     AmbientLight, AssetId, CameraId, CameraIntrinsics, DirectionalLight, Distribution,
@@ -19,16 +23,6 @@ use crate::{
     Meters, NonNegativeFinite, PointLight, PositiveMeters, RenderChannels, RigidTransform,
     SrgbColor, WeightedValue,
 };
-
-const DEFAULT_SCENE_ATTEMPT_LIMIT: u32 = 20;
-const DEFAULT_PLACEMENT_ATTEMPT_LIMIT: u32 = 100;
-const DEFAULT_FIXED_TIMESTEP_S: f32 = 1.0 / 240.0;
-const DEFAULT_MIN_STEPS: u32 = 120;
-const DEFAULT_MAX_STEPS: u32 = 4_800;
-const DEFAULT_STABILITY_CHECK_INTERVAL: u32 = 24;
-const DEFAULT_LINEAR_SLEEP_THRESHOLD_MPS: f32 = 0.01;
-const DEFAULT_ANGULAR_SLEEP_THRESHOLD_RAD_S: f32 = 0.05;
-const DEFAULT_REQUIRED_STABLE_CHECKS: u32 = 10;
 
 /// A parsed v1 run configuration whose nested values have all been validated.
 ///

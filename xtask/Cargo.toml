@@ -9,3 +9,5 @@ publish = false
 [lints]
 workspace = true
 
+[dependencies]
+bpp-core = { path = "../crates/bpp-core", features = ["schema"] }

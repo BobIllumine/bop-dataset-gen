@@ -54,3 +54,14 @@ pub use scenes::{
 pub use transforms::{
     CameraExtrinsics, InvalidRigidTransformError, Meters, RigidTransform, z_up_camera_to_opencv,
 };
+
+/// Generates the deterministic JSON Schema for the unchecked v1 TOML input shape.
+///
+/// The schema describes the private wire representation accepted by
+/// [`RunConfig::from_toml`]. Cross-field semantic constraints remain enforced
+/// by run-configuration validation after deserialization.
+#[cfg(feature = "schema")]
+#[must_use]
+pub fn run_config_json_schema() -> String {
+    run_config_wire::json_schema()
+}
