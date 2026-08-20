@@ -127,8 +127,10 @@ free. No Rayon integration is needed in `bpp-core` for this exercise.
 - all three `LEARN-01` TODO bodies are replaced without changing their public
   signatures;
 - the ignored exercise command passes every stable-vector, separation,
-  thread-order, iterator-order, exhaustion, independence, validation, and
-  large-bound assertion;
+  thread-order, iterator-order, exhaustion, independence, and large-bound
+  assertion;
+- the ordinary scaffold test passes its public-API, trait, fixed-label,
+  constructor-validation, and maximum-bound construction assertions;
 - ordinary focused and workspace gates remain green;
 - no global RNG, mutable seed cursor, lock, eager job list, recursive `next`,
   native-endian encoding, debug formatting, or total-length multiplication is
