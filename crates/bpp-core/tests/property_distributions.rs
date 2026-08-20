@@ -19,6 +19,25 @@ fn canonical_f64(value: f64) -> f64 {
     if value == 0.0 { 0.0 } else { value }
 }
 
+fn assert_generated_choice_shape<T>(values: &[(T, f64)]) {
+    let positive_pivot = values
+        .iter()
+        .position(|(_, weight)| *weight > 0.0)
+        .expect("valid choice strategy keeps a positive pivot");
+    assert!(!values.is_empty());
+    assert!(values.len() <= 4);
+    assert!(
+        values[..positive_pivot]
+            .iter()
+            .all(|(_, weight)| weight.to_bits() == 0.0_f64.to_bits())
+    );
+    assert!(
+        values
+            .iter()
+            .all(|(_, weight)| weight.is_finite() && *weight >= 0.0)
+    );
+}
+
 fn u32_case(case: &DistributionCase<u32>) -> Distribution<u32> {
     match case {
         DistributionCase::Fixed(value) => Distribution::<u32>::fixed(*value),
@@ -135,6 +154,7 @@ fn assert_u32_invariants(case: &DistributionCase<u32>, value: &Distribution<u32>
             assert_eq!(semantics, UniformSemantics::Inclusive);
         }
         (DistributionCase::Choice(expected), DistributionView::Choice { values }) => {
+            assert_generated_choice_shape(expected);
             assert_eq!(values.len(), expected.len());
             for (actual, (value, weight)) in values.iter().zip(expected) {
                 assert_eq!(actual.value(), value);
@@ -175,6 +195,7 @@ fn assert_f32_invariants(case: &DistributionCase<f32>, value: &Distribution<f32>
             assert_eq!(semantics, expected);
         }
         (DistributionCase::Choice(expected), DistributionView::Choice { values }) => {
+            assert_generated_choice_shape(expected);
             assert_eq!(values.len(), expected.len());
             for (actual, (value, weight)) in values.iter().zip(expected) {
                 assert_eq!(actual.value().to_bits(), canonical_f32(*value).to_bits());
@@ -230,7 +251,23 @@ proptest! {
 
         prop_assert_eq!(&decoded, &constructed, "case={:?}", case);
         prop_assert_eq!(serde_json::to_value(&constructed).unwrap(), wire, "case={:?}", case);
+        if let DistributionCase::Choice(values) = &case {
+            assert_generated_choice_shape(values);
+        }
         assert!(!matches!(constructed.view(), DistributionView::Uniform { .. }));
+    }
+
+    #[test]
+    fn valid_choice_strategy_supports_a_positive_pivot_after_leading_zeros(
+        values in property_support::distributions::valid_u32_choice_at_pivot(2),
+    ) {
+        prop_assert!(values.len() >= 3, "values={:?}", values);
+        prop_assert!(values[..2]
+            .iter()
+            .all(|(_, weight)| weight.to_bits() == 0.0_f64.to_bits()),
+            "values={:?}", values);
+        prop_assert!(values[2].1 > 0.0, "values={:?}", values);
+        assert_generated_choice_shape(&values);
     }
 
     #[test]

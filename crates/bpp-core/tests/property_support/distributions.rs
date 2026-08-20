@@ -93,16 +93,44 @@ fn ordered_f32_bounds() -> BoxedStrategy<(f32, f32)> {
     .boxed()
 }
 
+fn valid_choice_at_pivot<T>(
+    value: BoxedStrategy<T>,
+    positive_pivot: usize,
+) -> BoxedStrategy<Vec<(T, f64)>>
+where
+    T: Clone + std::fmt::Debug + 'static,
+{
+    assert!(
+        positive_pivot <= 3,
+        "choice pivot must fit the four-entry bound"
+    );
+    (
+        vec(value.clone(), positive_pivot),
+        (value.clone(), finite_positive_weight()),
+        vec((value, finite_nonnegative_weight()), 0..=3 - positive_pivot),
+    )
+        .prop_map(|(leading, positive, trailing)| {
+            leading
+                .into_iter()
+                .map(|value| (value, 0.0))
+                .chain(std::iter::once(positive))
+                .chain(trailing)
+                .collect()
+        })
+        .boxed()
+}
+
 fn valid_choice<T>(value: BoxedStrategy<T>) -> BoxedStrategy<Vec<(T, f64)>>
 where
     T: Clone + std::fmt::Debug + 'static,
 {
-    (
-        (value.clone(), finite_positive_weight()),
-        vec((value, finite_nonnegative_weight()), 0..=3),
-    )
-        .prop_map(|(first, rest)| std::iter::once(first).chain(rest).collect())
+    (0_usize..=3)
+        .prop_flat_map(move |positive_pivot| valid_choice_at_pivot(value.clone(), positive_pivot))
         .boxed()
+}
+
+pub fn valid_u32_choice_at_pivot(positive_pivot: usize) -> BoxedStrategy<Vec<(u32, f64)>> {
+    valid_choice_at_pivot((0_u32..=65_536).boxed(), positive_pivot)
 }
 
 pub fn valid_u32_distribution() -> BoxedStrategy<DistributionCase<u32>> {

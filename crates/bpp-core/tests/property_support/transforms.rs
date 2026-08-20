@@ -8,6 +8,14 @@ pub struct TransformCase {
     pub rotation_xyzw: [f32; 4],
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct CancellationCompositionCase {
+    pub left_rotation_xyzw: [f32; 4],
+    pub right_rotation_xyzw: [f32; 4],
+    pub right_translation: [f32; 3],
+    pub point: [f32; 3],
+}
+
 fn signed_component(limit: i16, divisor: f32) -> BoxedStrategy<f32> {
     prop_oneof![
         Just(-0.0_f32),
@@ -31,6 +39,26 @@ pub fn finite_point() -> BoxedStrategy<[f32; 3]> {
         signed_component(256, 8.0),
         signed_component(256, 8.0),
         signed_component(256, 8.0),
+    )
+        .prop_map(|(x, y, z)| [x, y, z])
+        .boxed()
+}
+
+fn cancellation_translation() -> BoxedStrategy<[f32; 3]> {
+    (
+        signed_component(64, 8.0),
+        signed_component(64, 8.0),
+        signed_component(64, 8.0),
+    )
+        .prop_map(|(x, y, z)| [x, y, z])
+        .boxed()
+}
+
+fn cancellation_point() -> BoxedStrategy<[f32; 3]> {
+    (
+        signed_component(128, 8.0),
+        signed_component(128, 8.0),
+        signed_component(128, 8.0),
     )
         .prop_map(|(x, y, z)| [x, y, z])
         .boxed()
@@ -62,5 +90,25 @@ pub fn valid_transform() -> BoxedStrategy<TransformCase> {
             translation,
             rotation_xyzw,
         })
+        .boxed()
+}
+
+pub fn cancellation_composition() -> BoxedStrategy<CancellationCompositionCase> {
+    (
+        nondegenerate_quaternion(),
+        nondegenerate_quaternion(),
+        cancellation_translation(),
+        cancellation_point(),
+    )
+        .prop_map(
+            |(left_rotation_xyzw, right_rotation_xyzw, right_translation, point)| {
+                CancellationCompositionCase {
+                    left_rotation_xyzw,
+                    right_rotation_xyzw,
+                    right_translation,
+                    point,
+                }
+            },
+        )
         .boxed()
 }
