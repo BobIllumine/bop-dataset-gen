@@ -84,6 +84,19 @@ fn schema_and_instance() -> (serde_json::Value, serde_json::Value) {
     (schema, instance)
 }
 
+fn resolve_reference<'a>(
+    root: &'a serde_json::Value,
+    schema: &'a serde_json::Value,
+) -> &'a serde_json::Value {
+    let Some(reference) = schema["$ref"].as_str() else {
+        return schema;
+    };
+    let definition = reference
+        .strip_prefix("#/$defs/")
+        .expect("local definition reference");
+    &root["$defs"][definition]
+}
+
 #[test]
 fn generation_is_deterministic_parseable_and_strict_at_the_root() {
     let first = run_config_json_schema();
@@ -139,17 +152,24 @@ fn schema_marks_defaults_bounds_enums_and_distribution_tags() {
         serde_json::json!(["automatic", "low_power", "high_performance"])
     );
 
-    let tags = definitions["DistributionWire"]["oneOf"]
+    let physical_properties = &definitions["PhysicalPropertyDistributionsWire"];
+    let mass_distribution =
+        resolve_reference(&schema, &physical_properties["properties"]["mass_kg"]);
+    let variants = mass_distribution["oneOf"]
         .as_array()
-        .expect("distribution variants")
+        .expect("mass distribution variants");
+    let tags = variants
         .iter()
         .map(|variant| variant["properties"]["kind"]["const"].as_str())
         .collect::<Vec<_>>();
     assert_eq!(tags, [Some("fixed"), Some("uniform"), Some("choice")]);
-    assert_eq!(
-        definitions["WeightedValueWire"]["additionalProperties"],
-        false
-    );
+
+    let choice = variants
+        .iter()
+        .find(|variant| variant["properties"]["kind"]["const"] == "choice")
+        .expect("choice distribution");
+    let weighted_value = resolve_reference(&schema, &choice["properties"]["values"]["items"]);
+    assert_eq!(weighted_value["additionalProperties"], false);
 }
 
 #[test]
@@ -194,6 +214,74 @@ fn schema_marks_nonempty_collections_and_nonnegative_choice_weights() {
 }
 
 #[test]
+fn asset_mixture_schema_exposes_only_fixed_and_choice_forms() {
+    let (schema, mut instance) = schema_and_instance();
+    let population = resolve_reference(&schema, &schema["properties"]["population"]);
+    let asset_mixture = resolve_reference(&schema, &population["properties"]["asset_mixture"]);
+    let tags = asset_mixture["oneOf"]
+        .as_array()
+        .expect("asset mixture variants")
+        .iter()
+        .map(|variant| variant["properties"]["kind"]["const"].as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(tags, [Some("fixed"), Some("choice")]);
+
+    instance["population"]["asset_mixture"] =
+        serde_json::json!({"kind": "uniform", "min": "part", "max": "part"});
+    let validator = jsonschema::validator_for(&schema).expect("schema compiles");
+    assert!(!validator.is_valid(&instance));
+}
+
+#[test]
+fn asset_mixture_schema_rejects_negative_choice_weights() {
+    let (schema, mut instance) = schema_and_instance();
+    let population = resolve_reference(&schema, &schema["properties"]["population"]);
+    let asset_mixture = resolve_reference(&schema, &population["properties"]["asset_mixture"]);
+    let choice = asset_mixture["oneOf"]
+        .as_array()
+        .expect("asset mixture variants")
+        .iter()
+        .find(|variant| variant["properties"]["kind"]["const"] == "choice")
+        .expect("choice variant");
+    let weighted_value = resolve_reference(&schema, &choice["properties"]["values"]["items"]);
+    let weight = resolve_reference(&schema, &weighted_value["properties"]["weight"]);
+
+    assert_eq!(weight["minimum"], 0.0);
+
+    instance["population"]["asset_mixture"]["values"][0]["weight"] = serde_json::json!(-0.1);
+    let validator = jsonschema::validator_for(&schema).expect("schema compiles");
+    assert!(!validator.is_valid(&instance));
+}
+
+#[test]
+fn schema_rejects_whitespace_only_runtime_nonblank_strings() {
+    let (schema, instance) = schema_and_instance();
+    let validator = jsonschema::validator_for(&schema).expect("schema compiles");
+
+    for pointer in [
+        "/run/output_path",
+        "/run/cache_path",
+        "/bin/material_label",
+        "/assets/0/id",
+        "/assets/0/source_path",
+        "/population/asset_mixture/values/0/value",
+        "/renderers/blenderproc/executable_path",
+        "/renderers/blenderproc/worker_path",
+        "/renderers/blenderproc/device_selection",
+    ] {
+        let mut whitespace_only = instance.clone();
+        *whitespace_only
+            .pointer_mut(pointer)
+            .expect("representative nonblank string field") = serde_json::json!(" \t\n");
+        assert!(
+            !validator.is_valid(&whitespace_only),
+            "schema accepted whitespace-only string at {pointer}"
+        );
+    }
+}
+
+#[test]
 fn camera_projection_and_pose_forms_are_mutually_exclusive() {
     let (schema, mut instance) = schema_and_instance();
     let validator = jsonschema::validator_for(&schema).expect("schema compiles");
@@ -211,6 +299,18 @@ fn camera_projection_and_pose_forms_are_mutually_exclusive() {
     instance["cameras"][0]["projection"] = serde_json::json!({"vertical_fov_deg": 55.0});
     instance["cameras"][0]["pose"] = serde_json::json!({});
     assert!(!validator.is_valid(&instance));
+}
+
+#[test]
+fn schema_accepts_camera_id_zero_like_run_config() {
+    let zero_id_toml = VALID_TOML.replace("id = 1\nimage_size", "id = 0\nimage_size");
+    RunConfig::from_toml(&zero_id_toml).expect("CameraId permits zero");
+
+    let (schema, mut instance) = schema_and_instance();
+    instance["cameras"][0]["id"] = serde_json::json!(0);
+    let validator = jsonschema::validator_for(&schema).expect("schema compiles");
+
+    assert!(validator.is_valid(&instance));
 }
 
 #[test]

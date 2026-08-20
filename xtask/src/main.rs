@@ -27,7 +27,11 @@ enum SchemaMode {
 
 #[derive(Debug, Eq, PartialEq)]
 enum Command {
-    Schema { mode: SchemaMode, output: PathBuf },
+    Schema {
+        mode: SchemaMode,
+        output: PathBuf,
+        output_is_explicit: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -58,11 +62,22 @@ impl std::error::Error for SchemaError {
 }
 
 fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
-    let Command::Schema { mode, output } = parse_args(args)?;
+    let Command::Schema {
+        mode,
+        output,
+        output_is_explicit,
+    } = parse_args(args)?;
     let generated = bpp_core::run_config_json_schema();
     write_or_check_schema(&output, generated.as_bytes(), mode).map_err(|error| {
         if matches!(error, SchemaError::Drift(_)) {
-            format!("{error}; run `cargo run -p xtask -- schema`")
+            if output_is_explicit {
+                format!(
+                    "{error}; run `cargo run -p xtask -- schema --output {}`",
+                    output.display()
+                )
+            } else {
+                format!("{error}; run `cargo run -p xtask -- schema`")
+            }
         } else {
             error.to_string()
         }
@@ -91,15 +106,21 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, Strin
             if output.is_some() {
                 return Err(USAGE.to_owned());
             }
-            output = Some(PathBuf::from(args.next().ok_or_else(|| USAGE.to_owned())?));
+            let value = args.next().ok_or_else(|| USAGE.to_owned())?;
+            if value.to_string_lossy().starts_with("--") {
+                return Err(USAGE.to_owned());
+            }
+            output = Some(PathBuf::from(value));
         } else {
             return Err(USAGE.to_owned());
         }
     }
 
+    let output_is_explicit = output.is_some();
     Ok(Command::Schema {
         mode,
         output: output.unwrap_or_else(default_schema_output),
+        output_is_explicit,
     })
 }
 
@@ -149,7 +170,9 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
 
-    use super::{Command, SchemaMode, default_schema_output, parse_args, write_or_check_schema};
+    use super::{
+        Command, SchemaMode, default_schema_output, parse_args, run, write_or_check_schema,
+    };
 
     static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -239,9 +262,43 @@ mod tests {
             command,
             Command::Schema {
                 mode: SchemaMode::Check,
-                output
+                output,
+                output_is_explicit: true,
             }
         );
+    }
+
+    #[test]
+    fn schema_cli_rejects_a_flag_as_the_output_value() {
+        let error = parse_args(["schema".into(), "--output".into(), "--check".into()])
+            .expect_err("output value is missing");
+
+        assert_eq!(error, "usage: xtask schema [--check] [--output PATH]");
+    }
+
+    #[test]
+    fn explicit_output_drift_remediation_preserves_the_output_path() {
+        let temp = TestDir::new();
+        let output = temp.path().join("custom-schema.json");
+        fs::write(&output, b"stale\n").expect("seed stale schema");
+
+        let error = run([
+            "schema".into(),
+            "--check".into(),
+            "--output".into(),
+            output.clone().into_os_string(),
+        ])
+        .expect_err("drift must fail");
+
+        assert_eq!(
+            error,
+            format!(
+                "schema drift: {}; run `cargo run -p xtask -- schema --output {}`",
+                output.display(),
+                output.display()
+            )
+        );
+        assert_eq!(fs::read(output).expect("read stale schema"), b"stale\n");
     }
 
     #[test]

@@ -60,12 +60,70 @@
       ],
       "type": "object"
     },
+    "AssetDistributionSchema": {
+      "description": "Schema-only specialization for the runtime-supported asset mixture forms.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "fixed",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/NonBlankStringSchema"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "choice",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "$ref": "#/$defs/AssetWeightedValueSchema"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "AssetWeightedValueSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "$ref": "#/$defs/NonBlankStringSchema"
+        },
+        "weight": {
+          "$ref": "#/$defs/NonNegativeF64Schema"
+        }
+      },
+      "required": [
+        "value",
+        "weight"
+      ],
+      "type": "object"
+    },
     "AssetWire": {
       "additionalProperties": false,
       "properties": {
         "id": {
-          "minLength": 1,
-          "type": "string"
+          "$ref": "#/$defs/NonBlankStringSchema"
         },
         "mixture_weight": {
           "$ref": "#/$defs/NonNegativeF64Schema"
@@ -77,8 +135,7 @@
           "$ref": "#/$defs/PhysicalPropertyDistributionsWire"
         },
         "source_path": {
-          "minLength": 1,
-          "type": "string"
+          "$ref": "#/$defs/NonBlankStringSchema"
         },
         "source_unit_scale_m": {
           "$ref": "#/$defs/PositiveF32Schema"
@@ -120,8 +177,7 @@
           "type": "array"
         },
         "material_label": {
-          "minLength": 1,
-          "type": "string"
+          "$ref": "#/$defs/NonBlankStringSchema"
         },
         "physical_properties": {
           "$ref": "#/$defs/SurfacePhysicalPropertiesWire"
@@ -147,12 +203,10 @@
       "additionalProperties": false,
       "properties": {
         "device_selection": {
-          "minLength": 1,
-          "type": "string"
+          "$ref": "#/$defs/NonBlankStringSchema"
         },
         "executable_path": {
-          "minLength": 1,
-          "type": "string"
+          "$ref": "#/$defs/NonBlankStringSchema"
         },
         "handshake_timeout_s": {
           "$ref": "#/$defs/PositiveF32Schema"
@@ -164,8 +218,7 @@
           "$ref": "#/$defs/PositiveU32Schema"
         },
         "worker_path": {
-          "minLength": 1,
-          "type": "string"
+          "$ref": "#/$defs/NonBlankStringSchema"
         }
       },
       "required": [
@@ -248,7 +301,10 @@
           "description": "Must be greater than `near_m`."
         },
         "id": {
-          "$ref": "#/$defs/PositiveU16Schema"
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
         },
         "image_size": {
           "$ref": "#/$defs/ImageSizeWire"
@@ -560,69 +616,6 @@
         }
       ]
     },
-    "DistributionWire": {
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "properties": {
-            "kind": {
-              "const": "fixed",
-              "type": "string"
-            },
-            "value": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "value"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "kind": {
-              "const": "uniform",
-              "type": "string"
-            },
-            "max": {
-              "type": "string"
-            },
-            "min": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "min",
-            "max"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "kind": {
-              "const": "choice",
-              "type": "string"
-            },
-            "values": {
-              "items": {
-                "$ref": "#/$defs/WeightedValueWire"
-              },
-              "minItems": 1,
-              "type": "array"
-            }
-          },
-          "required": [
-            "kind",
-            "values"
-          ],
-          "type": "object"
-        }
-      ]
-    },
     "ImageSizeWire": {
       "additionalProperties": false,
       "properties": {
@@ -638,6 +631,10 @@
         "height"
       ],
       "type": "object"
+    },
+    "NonBlankStringSchema": {
+      "pattern": "\\S",
+      "type": "string"
     },
     "NonNegativeF32Schema": {
       "format": "float",
@@ -810,7 +807,7 @@
       "additionalProperties": false,
       "properties": {
         "asset_mixture": {
-          "$ref": "#/$defs/DistributionWire"
+          "$ref": "#/$defs/AssetDistributionSchema"
         },
         "object_count": {
           "$ref": "#/$defs/DistributionSchema4"
@@ -831,12 +828,6 @@
       "exclusiveMinimum": 0.0,
       "format": "float",
       "type": "number"
-    },
-    "PositiveU16Schema": {
-      "format": "uint16",
-      "maximum": 65535,
-      "minimum": 1,
-      "type": "integer"
     },
     "PositiveU32Schema": {
       "format": "uint32",
@@ -863,8 +854,7 @@
       "additionalProperties": false,
       "properties": {
         "cache_path": {
-          "minLength": 1,
-          "type": "string"
+          "$ref": "#/$defs/NonBlankStringSchema"
         },
         "master_seed": {
           "format": "uint64",
@@ -872,8 +862,7 @@
           "type": "integer"
         },
         "output_path": {
-          "minLength": 1,
-          "type": "string"
+          "$ref": "#/$defs/NonBlankStringSchema"
         },
         "placement_attempt_limit_per_object": {
           "default": 100,
@@ -1128,23 +1117,6 @@
         },
         "weight": {
           "$ref": "#/$defs/NonNegativeF64Schema"
-        }
-      },
-      "required": [
-        "value",
-        "weight"
-      ],
-      "type": "object"
-    },
-    "WeightedValueWire": {
-      "additionalProperties": false,
-      "properties": {
-        "value": {
-          "type": "string"
-        },
-        "weight": {
-          "format": "double",
-          "type": "number"
         }
       },
       "required": [

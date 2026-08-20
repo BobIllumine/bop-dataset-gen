@@ -62,9 +62,9 @@ pub(super) struct RunWire {
     pub(super) renderer_workers: u32,
     #[cfg_attr(feature = "schema", schemars(with = "PositiveU32Schema"))]
     pub(super) queue_capacity: u32,
-    #[cfg_attr(feature = "schema", schemars(length(min = 1)))]
+    #[cfg_attr(feature = "schema", schemars(with = "NonBlankStringSchema"))]
     pub(super) output_path: String,
-    #[cfg_attr(feature = "schema", schemars(length(min = 1)))]
+    #[cfg_attr(feature = "schema", schemars(with = "NonBlankStringSchema"))]
     pub(super) cache_path: String,
 }
 
@@ -79,7 +79,7 @@ pub(super) struct BinWire {
     #[cfg_attr(feature = "schema", schemars(with = "PositiveF32Schema"))]
     pub(super) wall_thickness_m: f32,
     pub(super) world_from_bin: TransformWire,
-    #[cfg_attr(feature = "schema", schemars(length(min = 1)))]
+    #[cfg_attr(feature = "schema", schemars(with = "NonBlankStringSchema"))]
     pub(super) material_label: String,
     pub(super) physical_properties: SurfacePhysicalPropertiesWire,
 }
@@ -106,9 +106,9 @@ pub(super) struct TransformWire {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct AssetWire {
-    #[cfg_attr(feature = "schema", schemars(length(min = 1)))]
+    #[cfg_attr(feature = "schema", schemars(with = "NonBlankStringSchema"))]
     pub(super) id: String,
-    #[cfg_attr(feature = "schema", schemars(length(min = 1)))]
+    #[cfg_attr(feature = "schema", schemars(with = "NonBlankStringSchema"))]
     pub(super) source_path: String,
     #[cfg_attr(feature = "schema", schemars(with = "PositiveF32Schema"))]
     pub(super) source_unit_scale_m: f32,
@@ -184,6 +184,7 @@ pub(super) struct PopulationWire {
         schemars(with = "DistributionSchema<PositiveU32Schema>")
     )]
     pub(super) object_count: DistributionWire<u32>,
+    #[cfg_attr(feature = "schema", schemars(with = "AssetDistributionSchema"))]
     pub(super) asset_mixture: DistributionWire<String>,
     /// Bounds must be strictly ordered and contained by the configured bin.
     pub(super) spawn_volume: SpawnVolumeWire,
@@ -271,7 +272,6 @@ pub(super) struct PhysicsWire {
 #[derive(Clone, Copy, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CameraWire {
-    #[cfg_attr(feature = "schema", schemars(with = "PositiveU16Schema"))]
     pub(super) id: u16,
     pub(super) image_size: ImageSizeWire,
     #[cfg_attr(feature = "schema", schemars(with = "PositiveF32Schema"))]
@@ -439,11 +439,11 @@ pub(super) struct WgpuRendererWire {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct BlenderProcRendererWire {
-    #[cfg_attr(feature = "schema", schemars(length(min = 1)))]
+    #[cfg_attr(feature = "schema", schemars(with = "NonBlankStringSchema"))]
     pub(super) executable_path: String,
-    #[cfg_attr(feature = "schema", schemars(length(min = 1)))]
+    #[cfg_attr(feature = "schema", schemars(with = "NonBlankStringSchema"))]
     pub(super) worker_path: String,
-    #[cfg_attr(feature = "schema", schemars(length(min = 1)))]
+    #[cfg_attr(feature = "schema", schemars(with = "NonBlankStringSchema"))]
     pub(super) device_selection: String,
     #[cfg_attr(feature = "schema", schemars(with = "PositiveF32Schema"))]
     pub(super) handshake_timeout_s: f32,
@@ -499,12 +499,6 @@ struct PositiveU32Schema(#[schemars(range(min = 1))] u32);
 #[allow(dead_code)]
 #[derive(schemars::JsonSchema)]
 #[schemars(transparent)]
-struct PositiveU16Schema(#[schemars(range(min = 1))] u16);
-
-#[cfg(feature = "schema")]
-#[allow(dead_code)]
-#[derive(schemars::JsonSchema)]
-#[schemars(transparent)]
 struct PositiveF32Schema(#[schemars(extend("exclusiveMinimum" = 0.0))] f32);
 
 #[cfg(feature = "schema")]
@@ -518,6 +512,12 @@ struct NonNegativeF32Schema(#[schemars(range(min = 0.0))] f32);
 #[derive(schemars::JsonSchema)]
 #[schemars(transparent)]
 struct NonNegativeF64Schema(#[schemars(range(min = 0.0))] f64);
+
+#[cfg(feature = "schema")]
+#[allow(dead_code)]
+#[derive(schemars::JsonSchema)]
+#[schemars(transparent)]
+struct NonBlankStringSchema(#[schemars(pattern(r"\S"))] String);
 
 #[cfg(feature = "schema")]
 #[allow(dead_code)]
@@ -562,6 +562,33 @@ enum DistributionSchema<T> {
 #[serde(deny_unknown_fields)]
 struct WeightedValueSchema<T> {
     value: T,
+    #[schemars(with = "NonNegativeF64Schema")]
+    weight: f64,
+}
+
+/// Schema-only specialization for the runtime-supported asset mixture forms.
+#[cfg(feature = "schema")]
+#[allow(dead_code)]
+#[derive(schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum AssetDistributionSchema {
+    Fixed {
+        #[schemars(with = "NonBlankStringSchema")]
+        value: String,
+    },
+    Choice {
+        #[schemars(length(min = 1))]
+        values: Vec<AssetWeightedValueSchema>,
+    },
+}
+
+#[cfg(feature = "schema")]
+#[allow(dead_code)]
+#[derive(schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct AssetWeightedValueSchema {
+    #[schemars(with = "NonBlankStringSchema")]
+    value: String,
     #[schemars(with = "NonNegativeF64Schema")]
     weight: f64,
 }
