@@ -6,6 +6,8 @@ mod distributions;
 mod identifiers;
 mod render_reports;
 mod render_requests;
+mod run_config;
+mod run_config_wire;
 mod scenes;
 mod transforms;
 
@@ -32,6 +34,16 @@ pub use render_reports::{
 };
 pub use render_requests::{
     InvalidRenderChannelsError, InvalidRenderSceneRequestError, RenderChannels, RenderSceneRequest,
+};
+pub use run_config::{
+    AppearanceConfig, AppearanceField, AssetConfig, Axis, BinConfig, BlenderProcRendererConfig,
+    CameraConfig, CameraPose, CameraProjection, CameraShellField, ConfigCountField,
+    ConfigDistributionError, ConfigPathField, ConfigScalarField, ConfigTextField,
+    ConfigTransformField, DistributionField, PbrMaterialConfig, PhysicalPropertyDistributions,
+    PhysicsConfig, PopulationConfig, RendererConfigs, RunConfig, RunConfigError,
+    RunConfigValidationError, RunPlan, RunSettings, ShellCameraPose, SpawnVolume,
+    SurfacePhysicalProperties, VerticalFovDegrees, VhacdParameters, WgpuAdapterPreference,
+    WgpuDevicePreference, WgpuRendererConfig,
 };
 pub use scenes::{
     BinSnapshot, InstanceSnapshot, InvalidBinSnapshotError, InvalidPhysicsReportError,
