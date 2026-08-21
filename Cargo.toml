@@ -1,6 +1,28 @@
-[package]
-name = "bpp-dataset-gen"
+[workspace]
+resolver = "3"
+members = [
+    "crates/bpp-assets",
+    "crates/bpp-cli",
+    "crates/bpp-core",
+    "crates/bpp-dataset",
+    "crates/bpp-physics-rapier",
+    "crates/bpp-pipeline",
+    "crates/bpp-render-blenderproc",
+    "crates/bpp-render-wgpu",
+    "xtask",
+]
+default-members = ["crates/bpp-cli"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.97.1"
+license = "MIT OR Apache-2.0"
 
-[dependencies]
+[workspace.lints.rust]
+missing_docs = "deny"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }

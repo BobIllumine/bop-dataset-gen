@@ -1,0 +1,1222 @@
+{
+  "$defs": {
+    "AmbientWire": {
+      "additionalProperties": false,
+      "properties": {
+        "color": {
+          "items": {
+            "$ref": "#/$defs/NonNegativeF32Schema"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "intensity": {
+          "$ref": "#/$defs/NonNegativeF32Schema"
+        }
+      },
+      "required": [
+        "color",
+        "intensity"
+      ],
+      "type": "object"
+    },
+    "AppearanceWire": {
+      "additionalProperties": false,
+      "properties": {
+        "ambient": {
+          "$ref": "#/$defs/AmbientWire"
+        },
+        "background_srgb": {
+          "items": {
+            "$ref": "#/$defs/UnitF32Schema"
+          },
+          "maxItems": 4,
+          "minItems": 4,
+          "type": "array"
+        },
+        "directional_lights": {
+          "items": {
+            "$ref": "#/$defs/DirectionalLightWire"
+          },
+          "type": "array"
+        },
+        "material_defaults": {
+          "$ref": "#/$defs/PbrMaterialWire"
+        },
+        "point_lights": {
+          "items": {
+            "$ref": "#/$defs/PointLightWire"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "background_srgb",
+        "ambient",
+        "directional_lights",
+        "point_lights",
+        "material_defaults"
+      ],
+      "type": "object"
+    },
+    "AssetDistributionSchema": {
+      "description": "Schema-only specialization for the runtime-supported asset mixture forms.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "fixed",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/NonBlankStringSchema"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "choice",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "$ref": "#/$defs/AssetWeightedValueSchema"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "AssetWeightedValueSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "$ref": "#/$defs/NonBlankStringSchema"
+        },
+        "weight": {
+          "$ref": "#/$defs/NonNegativeF64Schema"
+        }
+      },
+      "required": [
+        "value",
+        "weight"
+      ],
+      "type": "object"
+    },
+    "AssetWire": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/NonBlankStringSchema"
+        },
+        "mixture_weight": {
+          "$ref": "#/$defs/NonNegativeF64Schema"
+        },
+        "model_transform": {
+          "$ref": "#/$defs/TransformWire"
+        },
+        "physical_properties": {
+          "$ref": "#/$defs/PhysicalPropertyDistributionsWire"
+        },
+        "source_path": {
+          "$ref": "#/$defs/NonBlankStringSchema"
+        },
+        "source_unit_scale_m": {
+          "$ref": "#/$defs/PositiveF32Schema"
+        },
+        "vhacd": {
+          "$ref": "#/$defs/VhacdWire"
+        },
+        "visual_override": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PbrMaterialWire"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "source_path",
+        "source_unit_scale_m",
+        "model_transform",
+        "mixture_weight",
+        "physical_properties",
+        "vhacd"
+      ],
+      "type": "object"
+    },
+    "BinWire": {
+      "additionalProperties": false,
+      "properties": {
+        "floor_thickness_m": {
+          "$ref": "#/$defs/PositiveF32Schema"
+        },
+        "inner_dimensions_m": {
+          "items": {
+            "$ref": "#/$defs/PositiveF32Schema"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "material_label": {
+          "$ref": "#/$defs/NonBlankStringSchema"
+        },
+        "physical_properties": {
+          "$ref": "#/$defs/SurfacePhysicalPropertiesWire"
+        },
+        "wall_thickness_m": {
+          "$ref": "#/$defs/PositiveF32Schema"
+        },
+        "world_from_bin": {
+          "$ref": "#/$defs/TransformWire"
+        }
+      },
+      "required": [
+        "inner_dimensions_m",
+        "floor_thickness_m",
+        "wall_thickness_m",
+        "world_from_bin",
+        "material_label",
+        "physical_properties"
+      ],
+      "type": "object"
+    },
+    "BlenderProcRendererWire": {
+      "additionalProperties": false,
+      "properties": {
+        "device_selection": {
+          "$ref": "#/$defs/NonBlankStringSchema"
+        },
+        "executable_path": {
+          "$ref": "#/$defs/NonBlankStringSchema"
+        },
+        "handshake_timeout_s": {
+          "$ref": "#/$defs/PositiveF32Schema"
+        },
+        "request_timeout_s": {
+          "$ref": "#/$defs/PositiveF32Schema"
+        },
+        "stderr_tail_capacity": {
+          "$ref": "#/$defs/PositiveU32Schema"
+        },
+        "worker_path": {
+          "$ref": "#/$defs/NonBlankStringSchema"
+        }
+      },
+      "required": [
+        "executable_path",
+        "worker_path",
+        "device_selection",
+        "handshake_timeout_s",
+        "request_timeout_s",
+        "stderr_tail_capacity"
+      ],
+      "type": "object"
+    },
+    "CameraPoseSchema": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "fixed_world_from_camera": {
+              "$ref": "#/$defs/TransformWire"
+            }
+          },
+          "required": [
+            "fixed_world_from_camera"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "shell": {
+              "$ref": "#/$defs/ShellCameraPoseWire"
+            }
+          },
+          "required": [
+            "shell"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "CameraProjectionSchema": {
+      "anyOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "opencv_k": {
+              "items": {
+                "format": "float",
+                "type": "number"
+              },
+              "maxItems": 9,
+              "minItems": 9,
+              "type": "array"
+            }
+          },
+          "required": [
+            "opencv_k"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "vertical_fov_deg": {
+              "$ref": "#/$defs/VerticalFovSchema"
+            }
+          },
+          "required": [
+            "vertical_fov_deg"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "CameraWire": {
+      "additionalProperties": false,
+      "properties": {
+        "far_m": {
+          "$ref": "#/$defs/PositiveF32Schema",
+          "description": "Must be greater than `near_m`."
+        },
+        "id": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "image_size": {
+          "$ref": "#/$defs/ImageSizeWire"
+        },
+        "near_m": {
+          "$ref": "#/$defs/PositiveF32Schema"
+        },
+        "pose": {
+          "$ref": "#/$defs/CameraPoseSchema"
+        },
+        "projection": {
+          "$ref": "#/$defs/CameraProjectionSchema"
+        }
+      },
+      "required": [
+        "id",
+        "image_size",
+        "near_m",
+        "far_m",
+        "projection",
+        "pose"
+      ],
+      "type": "object"
+    },
+    "DirectionalLightWire": {
+      "additionalProperties": false,
+      "properties": {
+        "color": {
+          "items": {
+            "$ref": "#/$defs/NonNegativeF32Schema"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "direction_world": {
+          "items": {
+            "format": "float",
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "illuminance_lux": {
+          "$ref": "#/$defs/NonNegativeF32Schema"
+        }
+      },
+      "required": [
+        "direction_world",
+        "color",
+        "illuminance_lux"
+      ],
+      "type": "object"
+    },
+    "DistributionSchema": {
+      "description": "Schema-only specialization of the actual generic distribution wire shape.\n\nUniform bounds must be ordered. Choice values must be nonempty and have a\nfinite, nonnegative weight set with positive total weight; those aggregate\nconstraints remain enforced by `RunConfig` validation.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "fixed",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/PositiveF32Schema"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "uniform",
+              "type": "string"
+            },
+            "max": {
+              "$ref": "#/$defs/PositiveF32Schema"
+            },
+            "min": {
+              "$ref": "#/$defs/PositiveF32Schema"
+            }
+          },
+          "required": [
+            "kind",
+            "min",
+            "max"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "choice",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "$ref": "#/$defs/WeightedValueSchema"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DistributionSchema2": {
+      "description": "Schema-only specialization of the actual generic distribution wire shape.\n\nUniform bounds must be ordered. Choice values must be nonempty and have a\nfinite, nonnegative weight set with positive total weight; those aggregate\nconstraints remain enforced by `RunConfig` validation.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "fixed",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/NonNegativeF32Schema"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "uniform",
+              "type": "string"
+            },
+            "max": {
+              "$ref": "#/$defs/NonNegativeF32Schema"
+            },
+            "min": {
+              "$ref": "#/$defs/NonNegativeF32Schema"
+            }
+          },
+          "required": [
+            "kind",
+            "min",
+            "max"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "choice",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "$ref": "#/$defs/WeightedValueSchema2"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DistributionSchema3": {
+      "description": "Schema-only specialization of the actual generic distribution wire shape.\n\nUniform bounds must be ordered. Choice values must be nonempty and have a\nfinite, nonnegative weight set with positive total weight; those aggregate\nconstraints remain enforced by `RunConfig` validation.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "fixed",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/UnitF32Schema"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "uniform",
+              "type": "string"
+            },
+            "max": {
+              "$ref": "#/$defs/UnitF32Schema"
+            },
+            "min": {
+              "$ref": "#/$defs/UnitF32Schema"
+            }
+          },
+          "required": [
+            "kind",
+            "min",
+            "max"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "choice",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "$ref": "#/$defs/WeightedValueSchema3"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DistributionSchema4": {
+      "description": "Schema-only specialization of the actual generic distribution wire shape.\n\nUniform bounds must be ordered. Choice values must be nonempty and have a\nfinite, nonnegative weight set with positive total weight; those aggregate\nconstraints remain enforced by `RunConfig` validation.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "fixed",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/PositiveU32Schema"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "uniform",
+              "type": "string"
+            },
+            "max": {
+              "$ref": "#/$defs/PositiveU32Schema"
+            },
+            "min": {
+              "$ref": "#/$defs/PositiveU32Schema"
+            }
+          },
+          "required": [
+            "kind",
+            "min",
+            "max"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "choice",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "$ref": "#/$defs/WeightedValueSchema4"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "values"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ImageSizeWire": {
+      "additionalProperties": false,
+      "properties": {
+        "height": {
+          "$ref": "#/$defs/PositiveU32Schema"
+        },
+        "width": {
+          "$ref": "#/$defs/PositiveU32Schema"
+        }
+      },
+      "required": [
+        "width",
+        "height"
+      ],
+      "type": "object"
+    },
+    "NonBlankStringSchema": {
+      "pattern": "\\S",
+      "type": "string"
+    },
+    "NonNegativeF32Schema": {
+      "format": "float",
+      "minimum": 0.0,
+      "type": "number"
+    },
+    "NonNegativeF64Schema": {
+      "format": "double",
+      "minimum": 0.0,
+      "type": "number"
+    },
+    "OutputWire": {
+      "additionalProperties": false,
+      "description": "At least one output channel must be enabled. Visible-instance output also\nrequires the resolved population maximum to fit in the instance-ID domain.",
+      "properties": {
+        "depth": {
+          "type": "boolean"
+        },
+        "rgb": {
+          "type": "boolean"
+        },
+        "visible_instances": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "rgb",
+        "depth",
+        "visible_instances"
+      ],
+      "type": "object"
+    },
+    "PbrMaterialWire": {
+      "additionalProperties": false,
+      "properties": {
+        "base_color_srgb": {
+          "items": {
+            "$ref": "#/$defs/UnitF32Schema"
+          },
+          "maxItems": 4,
+          "minItems": 4,
+          "type": "array"
+        },
+        "metallic": {
+          "$ref": "#/$defs/DistributionSchema3"
+        },
+        "roughness": {
+          "$ref": "#/$defs/DistributionSchema3"
+        }
+      },
+      "required": [
+        "base_color_srgb",
+        "metallic",
+        "roughness"
+      ],
+      "type": "object"
+    },
+    "PhysicalPropertyDistributionsWire": {
+      "additionalProperties": false,
+      "properties": {
+        "friction": {
+          "$ref": "#/$defs/DistributionSchema2"
+        },
+        "mass_kg": {
+          "$ref": "#/$defs/DistributionSchema"
+        },
+        "restitution": {
+          "$ref": "#/$defs/DistributionSchema3"
+        }
+      },
+      "required": [
+        "mass_kg",
+        "friction",
+        "restitution"
+      ],
+      "type": "object"
+    },
+    "PhysicsWire": {
+      "additionalProperties": false,
+      "properties": {
+        "angular_sleep_threshold_rad_s": {
+          "default": 0.05000000074505806,
+          "format": "float",
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "fixed_timestep_s": {
+          "default": 0.004166666883975267,
+          "exclusiveMinimum": 0.0,
+          "format": "float",
+          "type": "number"
+        },
+        "linear_sleep_threshold_mps": {
+          "default": 0.009999999776482582,
+          "format": "float",
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "max_steps": {
+          "default": 4800,
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "min_steps": {
+          "default": 120,
+          "description": "Must not exceed `max_steps`.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "required_stable_checks": {
+          "default": 10,
+          "description": "The stability interval times this count must not exceed `max_steps`.",
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "solver_iterations": {
+          "$ref": "#/$defs/PositiveU32Schema"
+        },
+        "stability_check_interval": {
+          "default": 24,
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "substeps": {
+          "$ref": "#/$defs/PositiveU32Schema"
+        }
+      },
+      "required": [
+        "substeps",
+        "solver_iterations"
+      ],
+      "type": "object"
+    },
+    "PointLightWire": {
+      "additionalProperties": false,
+      "properties": {
+        "color": {
+          "items": {
+            "$ref": "#/$defs/NonNegativeF32Schema"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "luminous_power_lm": {
+          "$ref": "#/$defs/NonNegativeF32Schema"
+        },
+        "position_world_m": {
+          "items": {
+            "format": "float",
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      },
+      "required": [
+        "position_world_m",
+        "color",
+        "luminous_power_lm"
+      ],
+      "type": "object"
+    },
+    "PopulationWire": {
+      "additionalProperties": false,
+      "properties": {
+        "asset_mixture": {
+          "$ref": "#/$defs/AssetDistributionSchema"
+        },
+        "object_count": {
+          "$ref": "#/$defs/DistributionSchema4"
+        },
+        "spawn_volume": {
+          "$ref": "#/$defs/SpawnVolumeWire",
+          "description": "Bounds must be strictly ordered and contained by the configured bin."
+        }
+      },
+      "required": [
+        "object_count",
+        "asset_mixture",
+        "spawn_volume"
+      ],
+      "type": "object"
+    },
+    "PositiveF32Schema": {
+      "exclusiveMinimum": 0.0,
+      "format": "float",
+      "type": "number"
+    },
+    "PositiveU32Schema": {
+      "format": "uint32",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "RenderersWire": {
+      "additionalProperties": false,
+      "properties": {
+        "blenderproc": {
+          "$ref": "#/$defs/BlenderProcRendererWire"
+        },
+        "wgpu": {
+          "$ref": "#/$defs/WgpuRendererWire"
+        }
+      },
+      "required": [
+        "wgpu",
+        "blenderproc"
+      ],
+      "type": "object"
+    },
+    "RunWire": {
+      "additionalProperties": false,
+      "properties": {
+        "cache_path": {
+          "$ref": "#/$defs/NonBlankStringSchema"
+        },
+        "master_seed": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "output_path": {
+          "$ref": "#/$defs/NonBlankStringSchema"
+        },
+        "placement_attempt_limit_per_object": {
+          "default": 100,
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "queue_capacity": {
+          "$ref": "#/$defs/PositiveU32Schema"
+        },
+        "renderer_workers": {
+          "$ref": "#/$defs/PositiveU32Schema"
+        },
+        "scene_attempt_limit": {
+          "default": 20,
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "simulation_workers": {
+          "$ref": "#/$defs/PositiveU32Schema"
+        },
+        "valid_scene_count": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "master_seed",
+        "valid_scene_count",
+        "simulation_workers",
+        "renderer_workers",
+        "queue_capacity",
+        "output_path",
+        "cache_path"
+      ],
+      "type": "object"
+    },
+    "ShellCameraPoseWire": {
+      "additionalProperties": false,
+      "properties": {
+        "max_azimuth_deg": {
+          "format": "float",
+          "type": "number"
+        },
+        "max_elevation_deg": {
+          "format": "float",
+          "type": "number"
+        },
+        "max_radius_m": {
+          "$ref": "#/$defs/PositiveF32Schema",
+          "description": "Must be greater than or equal to `min_radius_m`."
+        },
+        "min_azimuth_deg": {
+          "format": "float",
+          "type": "number"
+        },
+        "min_elevation_deg": {
+          "format": "float",
+          "type": "number"
+        },
+        "min_radius_m": {
+          "$ref": "#/$defs/PositiveF32Schema"
+        },
+        "target_bin_m": {
+          "items": {
+            "format": "float",
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      },
+      "required": [
+        "min_radius_m",
+        "max_radius_m",
+        "min_azimuth_deg",
+        "max_azimuth_deg",
+        "min_elevation_deg",
+        "max_elevation_deg",
+        "target_bin_m"
+      ],
+      "type": "object"
+    },
+    "SpawnVolumeWire": {
+      "additionalProperties": false,
+      "properties": {
+        "max_m": {
+          "items": {
+            "format": "float",
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "min_m": {
+          "items": {
+            "format": "float",
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      },
+      "required": [
+        "min_m",
+        "max_m"
+      ],
+      "type": "object"
+    },
+    "SurfacePhysicalPropertiesWire": {
+      "additionalProperties": false,
+      "properties": {
+        "friction": {
+          "$ref": "#/$defs/NonNegativeF32Schema"
+        },
+        "restitution": {
+          "$ref": "#/$defs/UnitF32Schema"
+        }
+      },
+      "required": [
+        "friction",
+        "restitution"
+      ],
+      "type": "object"
+    },
+    "TransformWire": {
+      "additionalProperties": false,
+      "properties": {
+        "rotation_xyzw": {
+          "items": {
+            "format": "float",
+            "type": "number"
+          },
+          "maxItems": 4,
+          "minItems": 4,
+          "type": "array"
+        },
+        "translation": {
+          "items": {
+            "format": "float",
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      },
+      "required": [
+        "translation",
+        "rotation_xyzw"
+      ],
+      "type": "object"
+    },
+    "UnitF32Schema": {
+      "format": "float",
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "type": "number"
+    },
+    "VerticalFovSchema": {
+      "exclusiveMaximum": 180.0,
+      "exclusiveMinimum": 0.0,
+      "format": "float",
+      "type": "number"
+    },
+    "VhacdWire": {
+      "additionalProperties": false,
+      "properties": {
+        "concavity": {
+          "$ref": "#/$defs/NonNegativeF32Schema"
+        },
+        "convex_hull_downsampling": {
+          "$ref": "#/$defs/PositiveU32Schema"
+        },
+        "max_convex_hulls": {
+          "$ref": "#/$defs/PositiveU32Schema"
+        },
+        "plane_downsampling": {
+          "$ref": "#/$defs/PositiveU32Schema"
+        },
+        "resolution": {
+          "$ref": "#/$defs/PositiveU32Schema"
+        }
+      },
+      "required": [
+        "resolution",
+        "max_convex_hulls",
+        "concavity",
+        "plane_downsampling",
+        "convex_hull_downsampling"
+      ],
+      "type": "object"
+    },
+    "WeightedValueSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "$ref": "#/$defs/PositiveF32Schema"
+        },
+        "weight": {
+          "$ref": "#/$defs/NonNegativeF64Schema"
+        }
+      },
+      "required": [
+        "value",
+        "weight"
+      ],
+      "type": "object"
+    },
+    "WeightedValueSchema2": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "$ref": "#/$defs/NonNegativeF32Schema"
+        },
+        "weight": {
+          "$ref": "#/$defs/NonNegativeF64Schema"
+        }
+      },
+      "required": [
+        "value",
+        "weight"
+      ],
+      "type": "object"
+    },
+    "WeightedValueSchema3": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "$ref": "#/$defs/UnitF32Schema"
+        },
+        "weight": {
+          "$ref": "#/$defs/NonNegativeF64Schema"
+        }
+      },
+      "required": [
+        "value",
+        "weight"
+      ],
+      "type": "object"
+    },
+    "WeightedValueSchema4": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "$ref": "#/$defs/PositiveU32Schema"
+        },
+        "weight": {
+          "$ref": "#/$defs/NonNegativeF64Schema"
+        }
+      },
+      "required": [
+        "value",
+        "weight"
+      ],
+      "type": "object"
+    },
+    "WgpuAdapterPreferenceWire": {
+      "enum": [
+        "automatic",
+        "low_power",
+        "high_performance"
+      ],
+      "type": "string"
+    },
+    "WgpuDevicePreferenceWire": {
+      "enum": [
+        "automatic",
+        "cpu",
+        "gpu"
+      ],
+      "type": "string"
+    },
+    "WgpuRendererWire": {
+      "additionalProperties": false,
+      "properties": {
+        "adapter_preference": {
+          "$ref": "#/$defs/WgpuAdapterPreferenceWire"
+        },
+        "device_preference": {
+          "$ref": "#/$defs/WgpuDevicePreferenceWire"
+        },
+        "rgb_fxaa": {
+          "type": "boolean"
+        },
+        "shadow_map_size": {
+          "$ref": "#/$defs/PositiveU32Schema"
+        }
+      },
+      "required": [
+        "device_preference",
+        "adapter_preference",
+        "shadow_map_size",
+        "rgb_fxaa"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The complete unchecked v1 TOML input shape.\n\nLocal scalar and structural constraints are represented in this schema.\nCross-field ordering, references, uniqueness, and aggregate constraints are\nenforced by `RunConfig` validation after deserialization.",
+  "properties": {
+    "appearance": {
+      "$ref": "#/$defs/AppearanceWire"
+    },
+    "assets": {
+      "items": {
+        "$ref": "#/$defs/AssetWire"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "bin": {
+      "$ref": "#/$defs/BinWire"
+    },
+    "cameras": {
+      "items": {
+        "$ref": "#/$defs/CameraWire"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "output": {
+      "$ref": "#/$defs/OutputWire"
+    },
+    "physics": {
+      "$ref": "#/$defs/PhysicsWire"
+    },
+    "population": {
+      "$ref": "#/$defs/PopulationWire"
+    },
+    "renderers": {
+      "$ref": "#/$defs/RenderersWire"
+    },
+    "run": {
+      "$ref": "#/$defs/RunWire"
+    }
+  },
+  "required": [
+    "run",
+    "bin",
+    "assets",
+    "population",
+    "physics",
+    "cameras",
+    "appearance",
+    "renderers",
+    "output"
+  ],
+  "title": "RunConfigV1",
+  "type": "object"
+}
