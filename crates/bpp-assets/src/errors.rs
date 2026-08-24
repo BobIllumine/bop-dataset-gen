@@ -2,6 +2,72 @@ use thiserror::Error;
 
 use crate::{MaterialIndex, TextureIndex};
 
+/// Error returned when STL loading options do not define safe conversion bounds.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum InvalidStlLoadOptionsError {
+    /// Source units cannot be converted to metres by a positive finite scale.
+    #[error("STL source-unit scale must be positive and finite")]
+    InvalidSourceUnitScale,
+    /// No triangles are permitted by the configured resource limit.
+    #[error("STL triangle limit must be nonzero")]
+    ZeroMaxTriangles,
+}
+
+/// Error returned when STL input cannot be converted into a normalized visual mesh.
+#[derive(Debug, Error, PartialEq)]
+pub enum StlLoadError {
+    /// The byte stream is not a well-formed ASCII or binary STL.
+    #[error("malformed STL: {message}")]
+    Malformed {
+        /// Parser diagnostic with no parser type exposed in the public API.
+        message: String,
+    },
+    /// The STL contains no triangles.
+    #[error("STL contains no triangles")]
+    EmptyMesh,
+    /// The input contains more triangles than the caller permits.
+    #[error("STL exceeds the configured limit of {limit} triangles")]
+    TriangleLimitExceeded {
+        /// Configured maximum triangle count.
+        limit: usize,
+    },
+    /// A source vertex coordinate is NaN or infinite.
+    #[error("STL triangle {triangle} vertex {vertex} component {component} is not finite")]
+    NonFiniteCoordinate {
+        /// Zero-based triangle index.
+        triangle: usize,
+        /// Zero-based vertex index within the triangle.
+        vertex: usize,
+        /// Zero-based coordinate component.
+        component: usize,
+    },
+    /// Scaling a source coordinate into metres overflowed `f32`.
+    #[error("scaled STL triangle {triangle} vertex {vertex} component {component} is not finite")]
+    ScaledCoordinateNotFinite {
+        /// Zero-based triangle index.
+        triangle: usize,
+        /// Zero-based vertex index within the triangle.
+        vertex: usize,
+        /// Zero-based coordinate component.
+        component: usize,
+    },
+    /// Three source vertices do not define a finite, nonzero-area triangle.
+    #[error("STL triangle {triangle} is degenerate")]
+    DegenerateTriangle {
+        /// Zero-based triangle index.
+        triangle: usize,
+    },
+    /// Three vertices per triangle cannot be represented by the normalized `u32` index stream.
+    #[error("STL vertex count exceeds u32 index capacity")]
+    VertexCountOverflow,
+    /// Generated geometry unexpectedly violated normalized primitive invariants.
+    #[error("generated STL primitive is invalid: {0}")]
+    InvalidPrimitive(#[from] InvalidVisualPrimitiveError),
+    /// Generated geometry unexpectedly violated normalized mesh invariants.
+    #[error("generated STL mesh is invalid: {0}")]
+    InvalidMesh(#[from] InvalidVisualMeshError),
+}
+
 /// Error returned when a visual primitive violates normalized mesh invariants.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum InvalidVisualPrimitiveError {
