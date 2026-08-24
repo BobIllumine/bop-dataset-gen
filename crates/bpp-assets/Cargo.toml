@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+bpp-core = { path = "../bpp-core" }
 glam = "0.30"
 gltf = { version = "=1.4.1", default-features = false, features = ["utils"] }
 image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png"] }

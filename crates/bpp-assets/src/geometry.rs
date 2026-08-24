@@ -12,6 +12,14 @@ pub struct VisualPrimitive {
     material: Option<MaterialIndex>,
 }
 
+pub(crate) struct VisualPrimitiveParts {
+    pub(crate) positions: Vec<[f32; 3]>,
+    pub(crate) normals: Vec<[f32; 3]>,
+    pub(crate) tex_coord_sets: Vec<Vec<[f32; 2]>>,
+    pub(crate) indices: Vec<u32>,
+    pub(crate) material: Option<MaterialIndex>,
+}
+
 impl VisualPrimitive {
     /// Creates a checked visual primitive and normalizes every input normal.
     ///
@@ -79,6 +87,47 @@ impl VisualPrimitive {
     pub const fn material(&self) -> Option<MaterialIndex> {
         self.material
     }
+
+    pub(crate) fn into_parts(self) -> VisualPrimitiveParts {
+        VisualPrimitiveParts {
+            positions: self.positions,
+            normals: self.normals,
+            tex_coord_sets: self.tex_coord_sets,
+            indices: self.indices,
+            material: self.material,
+        }
+    }
+
+    pub(crate) fn try_new_preserving_normals(
+        positions: Vec<[f32; 3]>,
+        normals: Vec<[f32; 3]>,
+        tex_coord_sets: Vec<Vec<[f32; 2]>>,
+        indices: Vec<u32>,
+        material: Option<MaterialIndex>,
+    ) -> Result<Self, InvalidVisualPrimitiveError> {
+        if positions.len() < 3 {
+            return Err(InvalidVisualPrimitiveError::TooFewPositions {
+                count: positions.len(),
+            });
+        }
+        if normals.len() != positions.len() {
+            return Err(InvalidVisualPrimitiveError::NormalCountMismatch {
+                positions: positions.len(),
+                normals: normals.len(),
+            });
+        }
+        validate_finite_positions(&positions)?;
+        validate_usable_normals(&normals)?;
+        validate_tex_coords(&tex_coord_sets, positions.len())?;
+        validate_visual_indices(&indices, positions.len())?;
+        Ok(Self {
+            positions,
+            normals,
+            tex_coord_sets,
+            indices,
+            material,
+        })
+    }
 }
 
 /// Checked collection of one or more visual primitives.
@@ -104,6 +153,10 @@ impl VisualMesh {
     #[must_use]
     pub fn primitives(&self) -> &[VisualPrimitive] {
         &self.primitives
+    }
+
+    pub(crate) fn into_primitives(self) -> Vec<VisualPrimitive> {
+        self.primitives
     }
 }
 
@@ -170,21 +223,36 @@ fn validate_finite_positions(positions: &[[f32; 3]]) -> Result<(), InvalidVisual
 
 fn normalize_normals(normals: &mut [[f32; 3]]) -> Result<(), InvalidVisualPrimitiveError> {
     for (vertex, normal) in normals.iter_mut().enumerate() {
-        for (component, scalar) in normal.iter().enumerate() {
-            if !scalar.is_finite() {
-                return Err(InvalidVisualPrimitiveError::NonFiniteNormal { vertex, component });
-            }
-        }
-        let squared_length = normal.iter().map(|value| value * value).sum::<f32>();
-        if squared_length == 0.0 || !squared_length.is_finite() {
-            return Err(InvalidVisualPrimitiveError::ZeroNormal { vertex });
-        }
+        let squared_length = validate_usable_normal(*normal, vertex)?;
         let length = squared_length.sqrt();
         for component in normal {
             *component /= length;
         }
     }
     Ok(())
+}
+
+fn validate_usable_normals(normals: &[[f32; 3]]) -> Result<(), InvalidVisualPrimitiveError> {
+    for (vertex, normal) in normals.iter().copied().enumerate() {
+        validate_usable_normal(normal, vertex)?;
+    }
+    Ok(())
+}
+
+fn validate_usable_normal(
+    normal: [f32; 3],
+    vertex: usize,
+) -> Result<f32, InvalidVisualPrimitiveError> {
+    for (component, scalar) in normal.iter().enumerate() {
+        if !scalar.is_finite() {
+            return Err(InvalidVisualPrimitiveError::NonFiniteNormal { vertex, component });
+        }
+    }
+    let squared_length = normal.iter().map(|value| value * value).sum::<f32>();
+    if squared_length == 0.0 || !squared_length.is_finite() {
+        return Err(InvalidVisualPrimitiveError::ZeroNormal { vertex });
+    }
+    Ok(squared_length)
 }
 
 fn validate_tex_coords(

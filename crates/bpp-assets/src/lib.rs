@@ -1,6 +1,7 @@
 //! Bounded asset ingestion and renderer-neutral geometry types.
 
 mod asset;
+mod canonical;
 mod errors;
 mod geometry;
 mod glb;
@@ -8,6 +9,9 @@ mod material;
 mod stl;
 
 pub use asset::NormalizedAsset;
+pub use canonical::{
+    CanonicalVisualAsset, CanonicalizeVisualAssetError, canonicalize_visual_asset,
+};
 pub use errors::{
     InvalidConvexPartError, InvalidNormalizedAssetError, InvalidPbrMaterialError,
     InvalidStlLoadOptionsError, InvalidTextureImageError, InvalidVisualMeshError,

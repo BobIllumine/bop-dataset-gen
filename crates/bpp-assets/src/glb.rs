@@ -243,6 +243,10 @@ impl LoadedVisualAsset {
     pub fn textures(&self) -> &[Texture] {
         &self.textures
     }
+
+    pub(crate) fn into_parts(self) -> (VisualMesh, Vec<PbrMaterial>, Vec<Texture>) {
+        (self.visual_mesh, self.materials, self.textures)
+    }
 }
 
 /// Error returned when GLB input cannot be represented by the v1 visual contract.

@@ -565,7 +565,11 @@ impl AssetConfig {
     pub const fn source_unit_scale_m(&self) -> PositiveMeters {
         self.source_unit_scale_m
     }
-    /// Returns the checked source-model transform.
+    /// Returns the checked transform from metre-scaled source-model coordinates
+    /// into canonical right-handed Z-up coordinates.
+    ///
+    /// Its translation is measured in metres and is applied after the source
+    /// unit scale. No implicit recentering or axis inference is performed.
     #[must_use]
     pub const fn model_transform(&self) -> RigidTransform {
         self.model_transform
