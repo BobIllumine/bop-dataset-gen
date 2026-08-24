@@ -4,6 +4,7 @@ mod analytic_bin;
 mod asset;
 mod cache_key;
 mod canonical;
+mod convex_cache;
 mod decomposition;
 mod errors;
 mod geometry;
@@ -18,6 +19,10 @@ pub use asset::NormalizedAsset;
 pub use cache_key::{AssetCacheKey, AssetCacheKeyInput, AssetSourceFormat, asset_cache_key};
 pub use canonical::{
     CanonicalVisualAsset, CanonicalizeVisualAssetError, canonicalize_visual_asset,
+};
+pub use convex_cache::{
+    CacheDisposition, CachedConvexParts, ConvexCacheIoOperation, ConvexDecompositionCache,
+    ConvexDecompositionCacheError,
 };
 pub use decomposition::{ConvexDecompositionError, VhacdResourceParameter, generate_convex_parts};
 pub use errors::{
