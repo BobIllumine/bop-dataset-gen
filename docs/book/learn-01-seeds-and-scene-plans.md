@@ -1,9 +1,9 @@
 # LEARN-01: Deterministic seeds and scene plans
 
-LEARN-01 asks you to complete two small algorithms that define how BPP plans
+LEARN-01 implemented two small algorithms that define how BPP plans
 reproducible work. The surrounding public API, protocol labels, validation,
-documentation, and executable contract are already present so you can focus on
-Rust ownership and state transitions.
+documentation, and executable contract isolate the relevant Rust ownership and
+state-transition concepts.
 
 The learner-owned bodies are:
 
@@ -16,17 +16,14 @@ test vectors while completing the exercise.
 
 ## Dependency status
 
-The implementation is intended to use the official `blake3` crate as a normal
-`bpp-core` dependency. On 2026-08-20, BLAKE3 1.8.6 still depended on
-`arrayref ^0.3.5` while every matching `arrayref` release was yanked. Cargo
-therefore refused to create a new safe lock entry. The scaffold deliberately
-does not vendor, patch, or lock a yanked release.
+The official `blake3` crate is an exact-pinned normal `bpp-core` dependency.
+Use that dependency directly when implementing the seed methods; do not add a
+git dependency, local vendor copy, or an alternative hashing implementation.
 
-Wait for BLAKE3 to publish a dependency graph Cargo can resolve without yanked
-packages, then add the official `blake3` crate to `[dependencies]` in
-`crates/bpp-core/Cargo.toml` before implementing the seed methods. Do not work
-around this with a git dependency, local vendor copy, or manually seeded yanked
-lock entry.
+BLAKE3 1.8.7 removed its former `arrayref` dependency after the crates.io
+owner of `arrayref` was compromised. The workspace deliberately pins 1.8.7 so
+the LEARN-01 implementation uses the reviewed dependency graph that contains
+neither `arrayref` nor the malicious `proc-macro1` crate.
 
 ## Concepts practiced
 
@@ -48,19 +45,18 @@ The scene plan is scene-major: emit every attempt for scene zero, then every
 attempt for scene one, and so on. A `2 x 3` plan therefore exposes six jobs in
 lexicographic `(scene, attempt)` order.
 
-## Recommended implementation order
+## Implementation sequence
 
-1. Confirm that Cargo can safely resolve the official `blake3` dependency.
-2. Complete `SeedDeriver::new`, then run the ignored exercise command. Its
-   failure should move from construction to derivation.
-3. Complete `SeedDeriver::derive`. Check the stable vectors first, then the
+1. Inspect the official `blake3` APIs linked below and derive the private key
+   material in `SeedDeriver::new`.
+2. Implement `SeedDeriver::derive`. Check the stable vectors first, then the
    repeatability, tuple-separation, and scoped-thread assertions.
-4. Before editing `ScenePlanIter::next`, write a state table for an ordinary
+3. For `ScenePlanIter::next`, use a state table covering an ordinary
    attempt, the final attempt of a scene, the final scene, and repeated calls
    after exhaustion.
-5. Complete `next` and verify the exact sequence, permanent exhaustion,
+4. Verify the exact sequence, permanent exhaustion,
    independent-iterator, and large-bound assertions.
-6. Run the focused and workspace quality gates listed below.
+5. Run the focused and workspace quality gates listed below.
 
 Keep `size_hint` and `ExactSizeIterator` out of the first solution. A total job
 count can exceed `usize`, and neither optimization is needed for correct
@@ -68,21 +64,15 @@ iteration.
 
 ## Commands
 
-From the repository root, the exercise checkpoint is:
-
-```console
-cargo test -p bpp-core --test learn_01 -- --ignored
-```
-
-Before the learner bodies are complete, this command is expected to fail at a
-`LEARN-01` TODO. Ordinary tests deliberately skip that exercise:
+From the repository root, run the focused regression contract with:
 
 ```console
 cargo test -p bpp-core --test learn_01 --locked
-cargo test --workspace --locked
 ```
 
-After all three bodies are complete, also run:
+The completed exercise tests are ordinary regression tests and therefore also
+run as part of `cargo test --workspace --locked`. The complete quality gates
+are:
 
 ```console
 cargo test -p bpp-core --all-features --locked
@@ -126,7 +116,7 @@ free. No Rayon integration is needed in `bpp-core` for this exercise.
 
 - all three `LEARN-01` TODO bodies are replaced without changing their public
   signatures;
-- the ignored exercise command passes every stable-vector, separation,
+- the focused regression command passes every stable-vector, separation,
   thread-order, iterator-order, exhaustion, independence, and large-bound
   assertion;
 - the ordinary scaffold test passes its public-API, trait, fixed-label,

@@ -1,4 +1,4 @@
-//! Executable contract for the LEARN-01 deterministic-planning exercise.
+//! Regression contract for deterministic seed and scene planning.
 
 use std::iter::FusedIterator;
 
@@ -51,16 +51,6 @@ fn scaffold_contracts_are_available_without_running_exercise_bodies() {
 }
 
 #[test]
-#[ignore = "LEARN-01 exercise"]
-fn learn_01_exercise_contracts() {
-    seed_derivation_matches_stable_protocol_vectors();
-    seed_derivation_is_repeatable_and_separates_every_tuple_component();
-    seed_derivation_is_independent_of_thread_schedule();
-    scene_plan_has_exact_scene_major_order_and_fused_exhaustion();
-    scene_plan_iterators_are_independent();
-    scene_plan_accepts_large_bounds_without_eager_length_arithmetic();
-}
-
 fn seed_derivation_matches_stable_protocol_vectors() {
     let vectors = [
         (
@@ -103,6 +93,7 @@ fn seed_derivation_matches_stable_protocol_vectors() {
     }
 }
 
+#[test]
 fn seed_derivation_is_repeatable_and_separates_every_tuple_component() {
     let deriver = SeedDeriver::new(0x0123_4567_89ab_cdef);
     let scene = SceneId::new(42);
@@ -127,6 +118,7 @@ fn seed_derivation_is_repeatable_and_separates_every_tuple_component() {
     );
 }
 
+#[test]
 fn seed_derivation_is_independent_of_thread_schedule() {
     let deriver = SeedDeriver::new(91);
     let tuples = [
@@ -156,6 +148,7 @@ fn seed_derivation_is_independent_of_thread_schedule() {
     assert_eq!(threaded, sequential);
 }
 
+#[test]
 fn scene_plan_has_exact_scene_major_order_and_fused_exhaustion() {
     let expected = [
         SceneJob::new(SceneId::new(0), AttemptId::new(0)),
@@ -172,6 +165,7 @@ fn scene_plan_has_exact_scene_major_order_and_fused_exhaustion() {
     assert_eq!(plan.next(), None);
 }
 
+#[test]
 fn scene_plan_iterators_are_independent() {
     let mut first = ScenePlanIter::try_new(2, 2).expect("nonzero bounds are valid");
     let mut second = ScenePlanIter::try_new(2, 2).expect("nonzero bounds are valid");
@@ -183,6 +177,7 @@ fn scene_plan_iterators_are_independent() {
     assert_eq!(second.next(), Some(first_job));
 }
 
+#[test]
 fn scene_plan_accepts_large_bounds_without_eager_length_arithmetic() {
     let mut plan = ScenePlanIter::try_new(u64::MAX, u32::MAX)
         .expect("the full identifier domains are valid bounds");

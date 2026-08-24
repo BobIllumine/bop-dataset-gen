@@ -40,7 +40,7 @@ impl SeedStage {
 
 /// Immutable owner of private material for deterministic stream derivation.
 ///
-/// # LEARN-01 protocol
+/// # Deterministic seed protocol
 ///
 /// Construction encodes the `u64` master seed explicitly as eight
 /// little-endian bytes and passes those bytes to BLAKE3's key-derivation API
@@ -57,46 +57,43 @@ impl SeedStage {
 /// same output, while changing any tuple component must select a different
 /// stream. Native-endian encoding, debug formatting, string concatenation,
 /// `DefaultHasher`, and a global RNG are not protocol-compatible substitutes.
-/// Consult BLAKE3's official `derive_key` and keyed-hashing documentation while
-/// implementing the exercise; the known vectors live in `tests/learn_01.rs`.
+/// The protocol is locked by known vectors in `tests/learn_01.rs`.
 ///
 /// The value stays immutable after construction. [`SeedDeriver::derive`] takes
 /// `&self`, advances no RNG cursor, and needs no mutex, so scheduling order
 /// cannot affect its output. Owned bytes make the type naturally `Send + Sync`;
 /// do not add `Arc`, `Mutex`, atomics, Rayon, or an RNG to this core contract.
 pub struct SeedDeriver {
-    #[allow(
-        dead_code,
-        reason = "the learner-owned derive body reads this private material after LEARN-01"
-    )]
     key_material: [u8; 32],
 }
 
 impl SeedDeriver {
     /// Creates private deterministic key material from a master seed.
     ///
-    /// This is a LEARN-01 exercise. Follow the documented KDF context and
-    /// explicit little-endian encoding; keep the derived material private.
-    ///
-    /// # Panics
-    ///
-    /// The learning scaffold intentionally panics until LEARN-01 is completed.
+    /// Uses the documented KDF context and explicit little-endian encoding;
+    /// the derived material remains private.
     #[must_use]
-    pub fn new(_master_seed: u64) -> Self {
-        todo!("LEARN-01: derive private BLAKE3 key material from the master seed")
+    pub fn new(master_seed: u64) -> Self {
+        let key_material = blake3::derive_key(
+            "bpp.dataset.seed-master.v1",
+            master_seed.to_le_bytes().as_ref(),
+        );
+        Self { key_material }
     }
 
     /// Derives the deterministic 32-byte stream seed for one tuple.
     ///
-    /// This is a LEARN-01 exercise. Use the fixed-width byte framing and stage
-    /// label documented on [`SeedDeriver`], without mutable or global state.
-    ///
-    /// # Panics
-    ///
-    /// The learning scaffold intentionally panics until LEARN-01 is completed.
+    /// Uses the fixed-width byte framing and stage label documented on
+    /// [`SeedDeriver`], without mutable or global state.
     #[must_use]
-    pub fn derive(&self, _scene: SceneId, _attempt: AttemptId, _stage: SeedStage) -> [u8; 32] {
-        todo!("LEARN-01: derive a keyed BLAKE3 stream seed for the requested tuple")
+    pub fn derive(&self, scene: SceneId, attempt: AttemptId, stage: SeedStage) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new_keyed(&self.key_material);
+        let hash = hasher
+            .update(scene.get().to_le_bytes().as_slice())
+            .update(attempt.get().to_le_bytes().as_slice())
+            .update(stage.protocol_label())
+            .finalize();
+        *hash.as_bytes()
     }
 }
 
@@ -136,13 +133,11 @@ impl SceneJob {
 /// `0..requested_scene_count`, and each scene emits attempt IDs covering
 /// `0..attempt_limit` before the next scene begins.
 ///
-/// # LEARN-01 iterator guidance
+/// # Iterator state machine
 ///
-/// Before coding [`Iterator::next`], write a state-machine table covering an
-/// ordinary attempt, the last attempt of a scene, the last scene, and the
-/// already-exhausted state. For each row, check the emitted job, the next
-/// counter state, and whether later calls must return `None`. Advance attempt
-/// before scene, avoid recursion, and make exhaustion permanent.
+/// The state machine covers an ordinary attempt, the last attempt of a scene,
+/// the last scene, and the already-exhausted state. It advances attempts before
+/// scenes, avoids recursion, and makes exhaustion permanent.
 ///
 /// The validated bounds and counters use the full `u64` scene and `u32`
 /// attempt domains. The respective bound value is a representable exhausted
@@ -154,10 +149,6 @@ impl SceneJob {
 /// do not share an iterator behind a lock. Scheduling must not change the
 /// sequence a fresh iterator produces.
 #[derive(Debug)]
-#[allow(
-    dead_code,
-    reason = "the learner-owned Iterator::next body reads this state after LEARN-01"
-)]
 pub struct ScenePlanIter {
     requested_scene_count: NonZeroU64,
     attempt_limit: NonZeroU32,
@@ -195,7 +186,17 @@ impl Iterator for ScenePlanIter {
     type Item = SceneJob;
 
     fn next(&mut self) -> Option<Self::Item> {
-        todo!("LEARN-01: advance the scene-major iterator state machine")
+        if self.next_attempt == self.attempt_limit.get() {
+            self.next_scene += 1;
+            self.next_attempt = 0;
+        }
+        if self.next_scene == self.requested_scene_count.get() {
+            return None;
+        }
+        let scene_id = SceneId::new(self.next_scene);
+        let attempt_id = AttemptId::new(self.next_attempt);
+        self.next_attempt += 1;
+        Some(SceneJob::new(scene_id, attempt_id))
     }
 }
 
