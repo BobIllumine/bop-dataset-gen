@@ -210,7 +210,9 @@ impl ConvexPart {
     }
 }
 
-fn validate_finite_positions(positions: &[[f32; 3]]) -> Result<(), InvalidVisualPrimitiveError> {
+pub(crate) fn validate_finite_positions(
+    positions: &[[f32; 3]],
+) -> Result<(), InvalidVisualPrimitiveError> {
     for (vertex, position) in positions.iter().enumerate() {
         for (component, scalar) in position.iter().enumerate() {
             if !scalar.is_finite() {

@@ -12,7 +12,7 @@ use crate::{
     InvalidPbrMaterialError, InvalidTextureImageError, InvalidVisualMeshError,
     InvalidVisualPrimitiveError, MagnificationFilter, MaterialIndex, MinificationFilter,
     PbrMaterial, Texture, TextureBinding, TextureImage, TextureIndex, TextureSampler, VisualMesh,
-    VisualPrimitive, WrapMode,
+    VisualPrimitive, WrapMode, geometry::validate_finite_positions,
 };
 
 /// A configurable resource dimension enforced during GLB ingestion.
@@ -761,6 +761,7 @@ fn load_primitive(
         .ok_or_else(|| unreadable_accessor(primitive_index, "POSITION"))?
         .map(|position| world.transform_point3(position.into()).to_array())
         .collect::<Vec<_>>();
+    validate_finite_positions(&positions).map_err(GlbLoadError::InvalidPrimitive)?;
     let mut loaded_tex_coord_sets = Vec::with_capacity(layout.tex_coord_sets.len());
     for set in layout.tex_coord_sets {
         let tex_coords = reader
@@ -1250,26 +1251,21 @@ fn expand_with_flat_normals(
         .collect::<Vec<_>>();
     let mut expanded_indices = Vec::with_capacity(indices.len());
     for (triangle, triangle_indices) in indices.chunks_exact(3).enumerate() {
-        let vertices = [
-            triangle_indices[0],
-            triangle_indices[1],
-            triangle_indices[2],
-        ]
-        .map(|index| {
-            usize::try_from(index)
+        let mut vertices = [[0.0; 3]; 3];
+        for (corner, index) in triangle_indices.iter().copied().enumerate() {
+            vertices[corner] = usize::try_from(index)
                 .ok()
                 .and_then(|index| positions.get(index))
                 .copied()
-        });
-        let [Some(first), Some(second), Some(third)] = vertices else {
-            return Err(GlbLoadError::InvalidPrimitive(
-                InvalidVisualPrimitiveError::IndexOutOfBounds {
-                    index_offset: triangle * 3,
-                    index: triangle_indices[0],
-                    vertex_count: positions.len(),
-                },
-            ));
-        };
+                .ok_or(GlbLoadError::InvalidPrimitive(
+                    InvalidVisualPrimitiveError::IndexOutOfBounds {
+                        index_offset: triangle * 3 + corner,
+                        index,
+                        vertex_count: positions.len(),
+                    },
+                ))?;
+        }
+        let [first, second, third] = vertices;
         let normal =
             flat_normal([first, second, third]).ok_or(GlbLoadError::DegenerateTriangle {
                 primitive,
