@@ -2,6 +2,7 @@
 
 mod analytic_bin;
 mod asset;
+mod cache_key;
 mod canonical;
 mod decomposition;
 mod errors;
@@ -14,6 +15,7 @@ pub use analytic_bin::{
     AnalyticBinCollision, AnalyticBinCollisionError, CollisionCuboid, analytic_bin_collision,
 };
 pub use asset::NormalizedAsset;
+pub use cache_key::{AssetCacheKey, AssetCacheKeyInput, AssetSourceFormat, asset_cache_key};
 pub use canonical::{
     CanonicalVisualAsset, CanonicalizeVisualAssetError, canonicalize_visual_asset,
 };

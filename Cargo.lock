@@ -108,6 +108,7 @@ checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
 name = "bpp-assets"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "bpp-core",
  "glam 0.30.10",
  "gltf",
