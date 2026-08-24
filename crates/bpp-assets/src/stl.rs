@@ -45,7 +45,11 @@ impl StlLoadOptions {
     }
 }
 
-/// Loads an ASCII or binary STL into one flat-shaded primitive in canonical metres.
+/// Loads an ASCII or binary STL into one flat-shaded primitive in its source frame.
+///
+/// STL has no standard unit or axis metadata. [`StlLoadOptions`] supplies the
+/// scale to metres; a later normalization stage must supply any source-frame to
+/// canonical-frame rotation.
 ///
 /// STL does not declare units, materials, texture coordinates, or reliable
 /// normals. `options` therefore supplies mandatory metres-per-source-unit and

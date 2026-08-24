@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{InvalidPbrMaterialError, InvalidTextureImageError};
 
 /// Stable index into a normalized asset's material table.
@@ -141,7 +143,7 @@ impl PbrMaterial {
 pub struct TextureImage {
     width: u32,
     height: u32,
-    rgba8_srgb: Vec<u8>,
+    rgba8_srgb: Arc<[u8]>,
 }
 
 impl TextureImage {
@@ -183,7 +185,7 @@ impl TextureImage {
         Ok(Self {
             width,
             height,
-            rgba8_srgb,
+            rgba8_srgb: rgba8_srgb.into(),
         })
     }
 

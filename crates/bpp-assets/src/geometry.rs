@@ -2,7 +2,7 @@ use crate::{
     InvalidConvexPartError, InvalidVisualMeshError, InvalidVisualPrimitiveError, MaterialIndex,
 };
 
-/// Checked indexed triangle primitive in canonical metres and Z-up coordinates.
+/// Checked indexed triangle primitive in metres in its owning asset frame.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VisualPrimitive {
     positions: Vec<[f32; 3]>,
@@ -50,13 +50,13 @@ impl VisualPrimitive {
         })
     }
 
-    /// Returns canonical vertex positions in metres.
+    /// Returns vertex positions in metres in the owning asset frame.
     #[must_use]
     pub fn positions(&self) -> &[[f32; 3]] {
         &self.positions
     }
 
-    /// Returns normalized vertex normals in canonical coordinates.
+    /// Returns normalized vertex normals in the owning asset frame.
     #[must_use]
     pub fn normals(&self) -> &[[f32; 3]] {
         &self.normals

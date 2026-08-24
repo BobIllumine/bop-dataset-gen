@@ -1,8 +1,9 @@
-//! Canonical asset ingestion and preprocessing.
+//! Bounded asset ingestion and renderer-neutral geometry types.
 
 mod asset;
 mod errors;
 mod geometry;
+mod glb;
 mod material;
 mod stl;
 
@@ -13,6 +14,10 @@ pub use errors::{
     InvalidVisualPrimitiveError, StlLoadError,
 };
 pub use geometry::{ConvexPart, VisualMesh, VisualPrimitive};
+pub use glb::{
+    GlbLimitField, GlbLoadError, GlbLoadLimits, GlbMaterialFeature, InvalidGlbLoadLimitsError,
+    LoadedVisualAsset, UnsupportedGlbFeature, load_glb,
+};
 pub use material::{
     MagnificationFilter, MaterialIndex, MinificationFilter, PbrMaterial, Texture, TextureBinding,
     TextureImage, TextureIndex, TextureSampler, WrapMode,
