@@ -2,7 +2,7 @@
 
 use bpp_assets::ConvexPart;
 use bpp_core::{AssetId, InstanceId, ResolvedPhysicalProperties, RigidTransform, RunConfig};
-use bpp_physics_rapier::{DynamicBodySpec, PhysicsWorld, PhysicsWorldError};
+use bpp_physics_rapier::{DynamicBodySpec, PhysicsWorld, PhysicsWorldError, PreparedPhysicsAsset};
 use std::time::Instant;
 
 /// Tolerance for finite `f32` values that round-trip through Rapier.
@@ -112,25 +112,16 @@ fn tetrahedron() -> ConvexPart {
     .expect("tetrahedron is checked")
 }
 
-fn coplanar_part() -> ConvexPart {
-    ConvexPart::try_new(
-        vec![
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [1.0, 1.0, 0.0],
-            [0.0, 1.0, 0.0],
-        ],
-        vec![0, 1, 2, 0, 2, 3],
-    )
-    .expect("coplanar indexed surface is checked")
-}
-
 fn identity_pose() -> RigidTransform {
     RigidTransform::try_new([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]).expect("identity is checked")
 }
 
-fn spec<'a>(id: InstanceId, asset_id: &'a AssetId, parts: &'a [ConvexPart]) -> DynamicBodySpec<'a> {
-    DynamicBodySpec::new(id, asset_id, parts, identity_pose(), properties())
+fn spec<'a>(
+    id: InstanceId,
+    asset_id: &'a AssetId,
+    asset: &'a PreparedPhysicsAsset,
+) -> DynamicBodySpec<'a> {
+    DynamicBodySpec::new(id, asset_id, asset, identity_pose(), properties())
 }
 
 fn assert_unchanged(world: &PhysicsWorld, expected_ids: &[InstanceId]) {
@@ -145,11 +136,12 @@ fn assert_unchanged(world: &PhysicsWorld, expected_ids: &[InstanceId]) {
 fn shuffled_input_inserts_and_iterates_by_ascending_instance_id() {
     let asset_id = asset_id();
     let parts = vec![tetrahedron()];
+    let asset = PreparedPhysicsAsset::try_new(&parts).expect("asset prepares once");
     let mut world = PhysicsWorld::try_new(&bin()).expect("finite bin constructs");
     let bodies = [
-        spec(instance_id(3), &asset_id, &parts),
-        spec(instance_id(1), &asset_id, &parts),
-        spec(instance_id(2), &asset_id, &parts),
+        spec(instance_id(3), &asset_id, &asset),
+        spec(instance_id(1), &asset_id, &asset),
+        spec(instance_id(2), &asset_id, &asset),
     ];
 
     world
@@ -166,12 +158,13 @@ fn shuffled_input_inserts_and_iterates_by_ascending_instance_id() {
 fn initial_pose_round_trips_within_documented_f32_tolerance() {
     let asset_id = asset_id();
     let parts = vec![tetrahedron()];
+    let asset = PreparedPhysicsAsset::try_new(&parts).expect("asset prepares once");
     let pose = RigidTransform::try_new(
         [1.25, -2.5, 3.75],
         [0.0, 0.0, 0.5_f32.sqrt(), 0.5_f32.sqrt()],
     )
     .expect("finite nontrivial pose is checked");
-    let body = DynamicBodySpec::new(instance_id(1), &asset_id, &parts, pose, properties());
+    let body = DynamicBodySpec::new(instance_id(1), &asset_id, &asset, pose, properties());
     let mut world = PhysicsWorld::try_new(&bin()).expect("finite bin constructs");
 
     world
@@ -197,10 +190,11 @@ fn initial_pose_round_trips_within_documented_f32_tolerance() {
 fn one_body_with_two_convex_parts_reports_two_colliders() {
     let asset_id = asset_id();
     let parts = vec![tetrahedron(), tetrahedron()];
+    let asset = PreparedPhysicsAsset::try_new(&parts).expect("asset prepares once");
     let mut world = PhysicsWorld::try_new(&bin()).expect("finite bin constructs");
 
     world
-        .insert_dynamic_bodies(&[spec(instance_id(1), &asset_id, &parts)])
+        .insert_dynamic_bodies(&[spec(instance_id(1), &asset_id, &asset)])
         .expect("checked body inserts");
 
     assert_eq!(world.collider_count(instance_id(1)), Some(2));
@@ -210,10 +204,11 @@ fn one_body_with_two_convex_parts_reports_two_colliders() {
 fn duplicate_ids_inside_a_batch_fail_atomically() {
     let asset_id = asset_id();
     let parts = vec![tetrahedron()];
+    let asset = PreparedPhysicsAsset::try_new(&parts).expect("asset prepares once");
     let mut world = PhysicsWorld::try_new(&bin()).expect("finite bin constructs");
     let bodies = [
-        spec(instance_id(1), &asset_id, &parts),
-        spec(instance_id(1), &asset_id, &parts),
+        spec(instance_id(1), &asset_id, &asset),
+        spec(instance_id(1), &asset_id, &asset),
     ];
 
     let error = world
@@ -231,13 +226,14 @@ fn duplicate_ids_inside_a_batch_fail_atomically() {
 fn existing_id_fails_atomically() {
     let asset_id = asset_id();
     let parts = vec![tetrahedron()];
+    let asset = PreparedPhysicsAsset::try_new(&parts).expect("asset prepares once");
     let mut world = PhysicsWorld::try_new(&bin()).expect("finite bin constructs");
     world
-        .insert_dynamic_bodies(&[spec(instance_id(1), &asset_id, &parts)])
+        .insert_dynamic_bodies(&[spec(instance_id(1), &asset_id, &asset)])
         .expect("first body inserts");
     let bodies = [
-        spec(instance_id(2), &asset_id, &parts),
-        spec(instance_id(1), &asset_id, &parts),
+        spec(instance_id(2), &asset_id, &asset),
+        spec(instance_id(1), &asset_id, &asset),
     ];
 
     let error = world
@@ -252,90 +248,65 @@ fn existing_id_fails_atomically() {
 }
 
 #[test]
-fn empty_parts_fail_atomically() {
+fn later_batch_with_lower_new_id_fails_atomically() {
     let asset_id = asset_id();
-    let empty_parts = Vec::new();
+    let parts = vec![tetrahedron()];
+    let asset = PreparedPhysicsAsset::try_new(&parts).expect("asset prepares once");
     let mut world = PhysicsWorld::try_new(&bin()).expect("finite bin constructs");
+    world
+        .insert_dynamic_bodies(&[spec(instance_id(5), &asset_id, &asset)])
+        .expect("first batch inserts");
 
     let error = world
-        .insert_dynamic_bodies(&[spec(instance_id(1), &asset_id, &empty_parts)])
-        .expect_err("empty parts must be rejected");
+        .insert_dynamic_bodies(&[
+            spec(instance_id(7), &asset_id, &asset),
+            spec(instance_id(4), &asset_id, &asset),
+        ])
+        .expect_err("later IDs must preserve global insertion order");
 
     assert!(matches!(
         error,
-        PhysicsWorldError::EmptyConvexParts { instance_id: id } if id == instance_id(1)
-    ));
-    assert_unchanged(&world, &[]);
-}
-
-#[test]
-fn coplanar_checked_part_fails_atomically() {
-    let asset_id = asset_id();
-    let invalid_parts = vec![coplanar_part()];
-    let mut world = PhysicsWorld::try_new(&bin()).expect("finite bin constructs");
-
-    let error = world
-        .insert_dynamic_bodies(&[spec(instance_id(1), &asset_id, &invalid_parts)])
-        .expect_err("Rapier must reject coplanar convex hulls");
-
-    assert!(matches!(
-        error,
-        PhysicsWorldError::InvalidConvexHull {
+        PhysicsWorldError::InstanceIdNotAfterPreviousMaximum {
             instance_id: id,
-            part_index: 0,
-        } if id == instance_id(1)
+            previous_maximum,
+        } if id == instance_id(4) && previous_maximum == instance_id(5)
     ));
-    assert_unchanged(&world, &[]);
+    assert_unchanged(&world, &[instance_id(5)]);
 }
 
 #[test]
-fn mixed_valid_and_invalid_batch_inserts_nothing() {
-    let asset_id = asset_id();
-    let valid_parts = vec![tetrahedron()];
-    let invalid_parts = vec![coplanar_part()];
-    let mut world = PhysicsWorld::try_new(&bin()).expect("finite bin constructs");
-    let bodies = [
-        spec(instance_id(1), &asset_id, &valid_parts),
-        spec(instance_id(2), &asset_id, &invalid_parts),
-    ];
-
-    let error = world
-        .insert_dynamic_bodies(&bodies)
-        .expect_err("invalid batch member rejects the entire batch");
-
-    assert!(matches!(
-        error,
-        PhysicsWorldError::InvalidConvexHull {
-            instance_id: id,
-            part_index: 0,
-        } if id == instance_id(2)
-    ));
-    assert_unchanged(&world, &[]);
-}
-
-#[test]
-#[ignore = "manual non-gating release construction timing"]
-fn measure_one_hundred_two_part_body_world_construction() {
+#[ignore = "manual non-gating release insertion timing"]
+fn measure_repeated_two_part_prepared_asset_insertion() {
     const BODY_COUNT: u16 = 100;
+    const SAMPLE_COUNT: usize = 25;
 
+    let bin = bin();
     let asset_id = asset_id();
     let parts = vec![tetrahedron(), tetrahedron()];
+    let vertex_count: usize = parts.iter().map(|part| part.vertices().len()).sum();
+    let triangle_count: usize = parts.iter().map(|part| part.indices().len() / 3).sum();
+    let preparation_start = Instant::now();
+    let asset = PreparedPhysicsAsset::try_new(&parts).expect("asset prepares once");
+    let preparation_elapsed = preparation_start.elapsed();
     let bodies: Vec<_> = (1..=BODY_COUNT)
-        .map(|id| spec(instance_id(id), &asset_id, &parts))
+        .map(|id| spec(instance_id(id), &asset_id, &asset))
         .collect();
 
-    let world_start = Instant::now();
-    let mut world = PhysicsWorld::try_new(&bin()).expect("finite bin constructs");
-    let bin_elapsed = world_start.elapsed();
-    let insertion_start = Instant::now();
-    world
-        .insert_dynamic_bodies(&bodies)
-        .expect("representative body batch inserts");
-    let insertion_elapsed = insertion_start.elapsed();
+    let mut insertion_samples = Vec::with_capacity(SAMPLE_COUNT);
+    for _ in 0..SAMPLE_COUNT {
+        let mut world = PhysicsWorld::try_new(&bin).expect("finite bin constructs");
+        let insertion_start = Instant::now();
+        world
+            .insert_dynamic_bodies(&bodies)
+            .expect("representative body batch inserts");
+        insertion_samples.push(insertion_start.elapsed());
+        assert_eq!(world.dynamic_body_count(), usize::from(BODY_COUNT));
+    }
+    insertion_samples.sort_unstable();
+    let median_insertion = insertion_samples[SAMPLE_COUNT / 2];
 
-    assert_eq!(world.dynamic_body_count(), usize::from(BODY_COUNT));
     eprintln!(
-        "serial Rapier construction: bin={bin_elapsed:?}, bodies={BODY_COUNT}, parts_per_body=2, insertion={insertion_elapsed:?}, total={:?}",
-        world_start.elapsed()
+        "serial Rapier synthetic fixture: preparation={preparation_elapsed:?}, samples={SAMPLE_COUNT}, bodies={BODY_COUNT}, parts_per_body={}, vertices_per_asset={vertex_count}, triangles_per_asset={triangle_count}, median_insertion={median_insertion:?}",
+        asset.part_count()
     );
 }
