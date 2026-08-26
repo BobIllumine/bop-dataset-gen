@@ -145,6 +145,7 @@ version = "0.1.0"
 name = "bpp-physics-rapier"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "bpp-assets",
  "bpp-core",
  "rapier3d",
