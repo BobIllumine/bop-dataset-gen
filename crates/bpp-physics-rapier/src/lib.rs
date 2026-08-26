@@ -2,4 +2,4 @@
 
 mod world;
 
-pub use world::{PhysicsWorld, PhysicsWorldError};
+pub use world::{DynamicBodySpec, PhysicsWorld, PhysicsWorldError};

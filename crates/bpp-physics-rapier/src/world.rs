@@ -1,14 +1,92 @@
-use bpp_assets::{AnalyticBinCollisionError, analytic_bin_collision};
-use bpp_core::{BinConfig, RigidTransform};
+use std::collections::{BTreeMap, BTreeSet};
+
+use bpp_assets::{AnalyticBinCollisionError, ConvexPart, analytic_bin_collision};
+use bpp_core::{AssetId, BinConfig, InstanceId, ResolvedPhysicalProperties, RigidTransform};
 use rapier3d::{
     na::{Isometry3, Quaternion, Translation3, UnitQuaternion, Vector3},
+    parry::shape::{ConvexPolyhedron, Shape},
     prelude::{
-        BroadPhaseBvh, CCDSolver, ColliderSet, ImpulseJointSet, IntegrationParameters,
-        IslandManager, MultibodyJointSet, NarrowPhase, PhysicsPipeline, Real, RigidBodyBuilder,
-        RigidBodyHandle, RigidBodySet,
+        BroadPhaseBvh, CCDSolver, Collider, ColliderHandle, ColliderSet, ImpulseJointSet,
+        IntegrationParameters, IslandManager, MultibodyJointSet, NarrowPhase, PhysicsPipeline,
+        Real, RigidBodyBuilder, RigidBodyHandle, RigidBodySet, SharedShape, Vector,
     },
 };
 use thiserror::Error;
+
+/// Borrowed checked input for one dynamic rigid body.
+pub struct DynamicBodySpec<'a> {
+    instance_id: InstanceId,
+    asset_id: &'a AssetId,
+    convex_parts: &'a [ConvexPart],
+    world_from_model: RigidTransform,
+    physical_properties: ResolvedPhysicalProperties,
+}
+
+impl<'a> DynamicBodySpec<'a> {
+    /// Creates a dynamic-body specification from checked borrowed geometry and metadata.
+    #[must_use]
+    pub const fn new(
+        instance_id: InstanceId,
+        asset_id: &'a AssetId,
+        convex_parts: &'a [ConvexPart],
+        world_from_model: RigidTransform,
+        physical_properties: ResolvedPhysicalProperties,
+    ) -> Self {
+        Self {
+            instance_id,
+            asset_id,
+            convex_parts,
+            world_from_model,
+            physical_properties,
+        }
+    }
+
+    /// Returns the stable ID assigned to this body.
+    #[must_use]
+    pub const fn instance_id(&self) -> InstanceId {
+        self.instance_id
+    }
+
+    /// Returns the resolved asset ID borrowed by this specification.
+    #[must_use]
+    pub const fn asset_id(&self) -> &AssetId {
+        self.asset_id
+    }
+
+    /// Returns the checked convex collision parts in source order.
+    #[must_use]
+    pub const fn convex_parts(&self) -> &'a [ConvexPart] {
+        self.convex_parts
+    }
+
+    /// Returns the initial transform from model coordinates to world coordinates.
+    #[must_use]
+    pub const fn world_from_model(&self) -> RigidTransform {
+        self.world_from_model
+    }
+
+    /// Returns the resolved mass and contact properties for this body.
+    #[must_use]
+    pub const fn physical_properties(&self) -> ResolvedPhysicalProperties {
+        self.physical_properties
+    }
+}
+
+#[allow(dead_code)]
+struct DynamicBodyMetadata {
+    asset_id: AssetId,
+    physical_properties: ResolvedPhysicalProperties,
+    body_handle: RigidBodyHandle,
+    collider_handles: Vec<ColliderHandle>,
+}
+
+struct PreparedDynamicBody {
+    instance_id: InstanceId,
+    asset_id: AssetId,
+    world_from_model: Isometry3<Real>,
+    physical_properties: ResolvedPhysicalProperties,
+    colliders: Vec<Collider>,
+}
 
 /// A serial Rapier world containing the fixed analytic bin.
 #[allow(dead_code)]
@@ -26,6 +104,7 @@ pub struct PhysicsWorld {
     gravity: Vector3<Real>,
     bin_body: RigidBodyHandle,
     bin_collider_count: usize,
+    dynamic_bodies: BTreeMap<InstanceId, DynamicBodyMetadata>,
 }
 
 /// Error returned when a physics world cannot be constructed.
@@ -38,6 +117,26 @@ pub enum PhysicsWorldError {
     /// A Rapier pose could not be represented as a finite core transform.
     #[error("Rapier pose cannot be represented as a finite core transform")]
     NonFiniteTransform,
+    /// A submitted instance ID is duplicated in the batch or already exists in the world.
+    #[error("duplicate dynamic-body instance ID {instance_id:?}")]
+    DuplicateInstanceId {
+        /// The duplicate stable instance ID.
+        instance_id: InstanceId,
+    },
+    /// A submitted body has no convex collision parts.
+    #[error("dynamic body {instance_id:?} has no convex collision parts")]
+    EmptyConvexParts {
+        /// The stable ID of the body with no collision parts.
+        instance_id: InstanceId,
+    },
+    /// Rapier could not form one checked convex part into a volumetric hull.
+    #[error("dynamic body {instance_id:?} convex part {part_index} is not volumetric")]
+    InvalidConvexHull {
+        /// The stable ID of the body containing the rejected part.
+        instance_id: InstanceId,
+        /// The zero-based source-order index of the rejected convex part.
+        part_index: usize,
+    },
 }
 
 impl PhysicsWorld {
@@ -83,6 +182,7 @@ impl PhysicsWorld {
             gravity,
             bin_body,
             bin_collider_count: cuboids.len(),
+            dynamic_bodies: BTreeMap::new(),
         })
     }
 
@@ -96,6 +196,123 @@ impl PhysicsWorld {
     #[must_use]
     pub const fn bin_collider_count(&self) -> usize {
         self.bin_collider_count
+    }
+
+    /// Returns the number of inserted dynamic rigid bodies.
+    #[must_use]
+    pub fn dynamic_body_count(&self) -> usize {
+        self.dynamic_bodies.len()
+    }
+
+    /// Iterates inserted body IDs in ascending stable-ID order.
+    #[must_use]
+    pub fn instance_ids(&self) -> impl ExactSizeIterator<Item = InstanceId> + '_ {
+        self.dynamic_bodies.keys().copied()
+    }
+
+    /// Returns an inserted body's current world pose, if its stored Rapier pose is finite.
+    #[must_use]
+    pub fn body_pose(&self, instance_id: InstanceId) -> Option<RigidTransform> {
+        let metadata = self.dynamic_bodies.get(&instance_id)?;
+        let body = self.rigid_bodies.get(metadata.body_handle)?;
+        rigid_transform_from_isometry((*body.position()).into()).ok()
+    }
+
+    /// Returns the number of colliders attached to an inserted dynamic body.
+    #[must_use]
+    pub fn collider_count(&self, instance_id: InstanceId) -> Option<usize> {
+        self.dynamic_bodies
+            .get(&instance_id)
+            .map(|metadata| metadata.collider_handles.len())
+    }
+
+    /// Validates and inserts a complete dynamic-body batch in stable-ID order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error without changing the world when an ID is duplicate, a
+    /// body has no collision parts, a convex hull is not volumetric, or a
+    /// checked transform cannot be represented by Rapier.
+    pub fn insert_dynamic_bodies(
+        &mut self,
+        bodies: &[DynamicBodySpec<'_>],
+    ) -> Result<(), PhysicsWorldError> {
+        let mut submitted_ids = BTreeSet::new();
+        let mut prepared = Vec::with_capacity(bodies.len());
+
+        for body in bodies {
+            let instance_id = body.instance_id();
+            if !submitted_ids.insert(instance_id) || self.dynamic_bodies.contains_key(&instance_id)
+            {
+                return Err(PhysicsWorldError::DuplicateInstanceId { instance_id });
+            }
+            if body.convex_parts().is_empty() {
+                return Err(PhysicsWorldError::EmptyConvexParts { instance_id });
+            }
+
+            let mut colliders = Vec::with_capacity(body.convex_parts().len());
+            for (part_index, part) in body.convex_parts().iter().enumerate() {
+                let vertices = part
+                    .vertices()
+                    .iter()
+                    .map(|&[x, y, z]| Vector::new(x, y, z))
+                    .collect::<Vec<_>>();
+                let hull = ConvexPolyhedron::from_convex_hull(&vertices)
+                    .filter(|hull| {
+                        let mass = hull.mass_properties(1.0).mass();
+                        mass.is_finite() && mass > 0.0
+                    })
+                    .ok_or(PhysicsWorldError::InvalidConvexHull {
+                        instance_id,
+                        part_index,
+                    })?;
+                let collider = rapier3d::prelude::ColliderBuilder::new(SharedShape::new(hull))
+                    .density(0.0)
+                    .friction(body.physical_properties().friction())
+                    .restitution(body.physical_properties().restitution())
+                    .build();
+                colliders.push(collider);
+            }
+
+            prepared.push(PreparedDynamicBody {
+                instance_id,
+                asset_id: body.asset_id().clone(),
+                world_from_model: rigid_transform_to_isometry(body.world_from_model())?,
+                physical_properties: body.physical_properties(),
+                colliders,
+            });
+        }
+
+        prepared.sort_unstable_by_key(|body| body.instance_id);
+        for body in prepared {
+            let body_handle = self.rigid_bodies.insert(
+                RigidBodyBuilder::dynamic()
+                    .pose(body.world_from_model.into())
+                    .additional_mass(body.physical_properties.mass_kg())
+                    .build(),
+            );
+            let collider_handles = body
+                .colliders
+                .into_iter()
+                .map(|collider| {
+                    self.colliders
+                        .insert_with_parent(collider, body_handle, &mut self.rigid_bodies)
+                })
+                .collect();
+            self.rigid_bodies[body_handle]
+                .recompute_mass_properties_from_colliders(&self.colliders);
+            self.dynamic_bodies.insert(
+                body.instance_id,
+                DynamicBodyMetadata {
+                    asset_id: body.asset_id,
+                    physical_properties: body.physical_properties,
+                    body_handle,
+                    collider_handles,
+                },
+            );
+        }
+
+        Ok(())
     }
 }
 
@@ -129,10 +346,12 @@ fn rigid_transform_from_isometry(
 
 #[cfg(test)]
 mod tests {
-    use bpp_assets::analytic_bin_collision;
-    use bpp_core::RunConfig;
+    use bpp_assets::{ConvexPart, analytic_bin_collision};
+    use bpp_core::{AssetId, InstanceId, ResolvedPhysicalProperties, RunConfig};
 
-    use super::{PhysicsWorld, rigid_transform_from_isometry, rigid_transform_to_isometry};
+    use super::{
+        DynamicBodySpec, PhysicsWorld, rigid_transform_from_isometry, rigid_transform_to_isometry,
+    };
 
     fn bin(
         translation: [f32; 3],
@@ -282,6 +501,73 @@ visible_instances = false
         for collider in world.colliders.iter().map(|(_, collider)| collider) {
             assert_eq!(collider.friction().to_bits(), 0.73_f32.to_bits());
             assert_eq!(collider.restitution().to_bits(), 0.27_f32.to_bits());
+        }
+    }
+
+    #[test]
+    fn dynamic_body_mass_is_independent_of_part_count_and_colliders_use_contact_properties() {
+        let asset_id = AssetId::new("part").expect("nonempty asset ID");
+        let instance_id = InstanceId::new(1).expect("nonzero instance ID");
+        let properties = ResolvedPhysicalProperties::try_new(2.5, 0.73, 0.27)
+            .expect("valid physical properties");
+        let part = ConvexPart::try_new(
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            vec![0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3],
+        )
+        .expect("tetrahedron is checked");
+        let one_part = vec![part.clone()];
+        let two_parts = vec![part.clone(), part];
+        let mut one_part_world =
+            PhysicsWorld::try_new(&bin([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], 0.5, 0.1))
+                .expect("finite bin constructs");
+        let mut two_part_world =
+            PhysicsWorld::try_new(&bin([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], 0.5, 0.1))
+                .expect("finite bin constructs");
+
+        one_part_world
+            .insert_dynamic_bodies(&[DynamicBodySpec::new(
+                instance_id,
+                &asset_id,
+                &one_part,
+                bpp_core::RigidTransform::identity(),
+                properties,
+            )])
+            .expect("one-part body inserts");
+        two_part_world
+            .insert_dynamic_bodies(&[DynamicBodySpec::new(
+                instance_id,
+                &asset_id,
+                &two_parts,
+                bpp_core::RigidTransform::identity(),
+                properties,
+            )])
+            .expect("two-part body inserts");
+
+        for world in [&one_part_world, &two_part_world] {
+            let metadata = world
+                .dynamic_bodies
+                .get(&instance_id)
+                .expect("inserted body metadata is stored");
+            assert_eq!(
+                world.rigid_bodies[metadata.body_handle].mass().to_bits(),
+                properties.mass_kg().to_bits()
+            );
+            for &collider_handle in &metadata.collider_handles {
+                let collider = &world.colliders[collider_handle];
+                assert_eq!(
+                    collider.friction().to_bits(),
+                    properties.friction().to_bits()
+                );
+                assert_eq!(
+                    collider.restitution().to_bits(),
+                    properties.restitution().to_bits()
+                );
+            }
         }
     }
 }
