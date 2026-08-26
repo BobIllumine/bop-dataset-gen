@@ -107,7 +107,7 @@ pub struct PhysicsWorld {
     dynamic_bodies: BTreeMap<InstanceId, DynamicBodyMetadata>,
 }
 
-/// Error returned when a physics world cannot be constructed.
+/// Error returned when a physics world cannot be constructed, populated, or queried.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum PhysicsWorldError {
@@ -210,12 +210,23 @@ impl PhysicsWorld {
         self.dynamic_bodies.keys().copied()
     }
 
-    /// Returns an inserted body's current world pose, if its stored Rapier pose is finite.
-    #[must_use]
-    pub fn body_pose(&self, instance_id: InstanceId) -> Option<RigidTransform> {
-        let metadata = self.dynamic_bodies.get(&instance_id)?;
-        let body = self.rigid_bodies.get(metadata.body_handle)?;
-        rigid_transform_from_isometry((*body.position()).into()).ok()
+    /// Returns an inserted body's current world pose, if it exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PhysicsWorldError::NonFiniteTransform`] if the stored Rapier
+    /// pose cannot be represented by a checked core transform.
+    pub fn body_pose(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<Option<RigidTransform>, PhysicsWorldError> {
+        let Some(metadata) = self.dynamic_bodies.get(&instance_id) else {
+            return Ok(None);
+        };
+        let Some(body) = self.rigid_bodies.get(metadata.body_handle) else {
+            return Ok(None);
+        };
+        rigid_transform_from_isometry((*body.position()).into()).map(Some)
     }
 
     /// Returns the number of colliders attached to an inserted dynamic body.
@@ -348,9 +359,11 @@ fn rigid_transform_from_isometry(
 mod tests {
     use bpp_assets::{ConvexPart, analytic_bin_collision};
     use bpp_core::{AssetId, InstanceId, ResolvedPhysicalProperties, RunConfig};
+    use rapier3d::na::Isometry3;
 
     use super::{
-        DynamicBodySpec, PhysicsWorld, rigid_transform_from_isometry, rigid_transform_to_isometry,
+        DynamicBodySpec, PhysicsWorld, PhysicsWorldError, rigid_transform_from_isometry,
+        rigid_transform_to_isometry,
     };
 
     fn bin(
@@ -569,5 +582,114 @@ visible_instances = false
                 );
             }
         }
+    }
+
+    #[test]
+    fn body_pose_preserves_a_nonfinite_stored_pose_as_a_typed_error() {
+        let asset_id = AssetId::new("part").expect("nonempty asset ID");
+        let instance_id = InstanceId::new(1).expect("nonzero instance ID");
+        let properties = ResolvedPhysicalProperties::try_new(2.5, 0.73, 0.27)
+            .expect("valid physical properties");
+        let parts = vec![
+            ConvexPart::try_new(
+                vec![
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+                vec![0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3],
+            )
+            .expect("tetrahedron is checked"),
+        ];
+        let mut world =
+            PhysicsWorld::try_new(&bin([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], 0.5, 0.1))
+                .expect("finite bin constructs");
+        world
+            .insert_dynamic_bodies(&[DynamicBodySpec::new(
+                instance_id,
+                &asset_id,
+                &parts,
+                bpp_core::RigidTransform::identity(),
+                properties,
+            )])
+            .expect("checked body inserts");
+        let body_handle = world
+            .dynamic_bodies
+            .get(&instance_id)
+            .expect("inserted body metadata is stored")
+            .body_handle;
+        world.rigid_bodies[body_handle]
+            .set_position(Isometry3::translation(f32::NAN, 0.0, 0.0).into(), true);
+
+        assert!(matches!(
+            world.body_pose(instance_id),
+            Err(PhysicsWorldError::NonFiniteTransform)
+        ));
+    }
+
+    #[test]
+    fn mixed_invalid_batch_leaves_rapier_sets_unchanged() {
+        let asset_id = AssetId::new("part").expect("nonempty asset ID");
+        let properties = ResolvedPhysicalProperties::try_new(2.5, 0.73, 0.27)
+            .expect("valid physical properties");
+        let valid_parts = vec![
+            ConvexPart::try_new(
+                vec![
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+                vec![0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3],
+            )
+            .expect("tetrahedron is checked"),
+        ];
+        let invalid_parts = vec![
+            ConvexPart::try_new(
+                vec![
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [1.0, 1.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                ],
+                vec![0, 1, 2, 0, 2, 3],
+            )
+            .expect("coplanar indexed surface is checked"),
+        ];
+        let mut world =
+            PhysicsWorld::try_new(&bin([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], 0.5, 0.1))
+                .expect("finite bin constructs");
+        let rigid_body_count = world.rigid_bodies.len();
+        let collider_count = world.colliders.len();
+
+        let error = world
+            .insert_dynamic_bodies(&[
+                DynamicBodySpec::new(
+                    InstanceId::new(1).expect("nonzero instance ID"),
+                    &asset_id,
+                    &valid_parts,
+                    bpp_core::RigidTransform::identity(),
+                    properties,
+                ),
+                DynamicBodySpec::new(
+                    InstanceId::new(2).expect("nonzero instance ID"),
+                    &asset_id,
+                    &invalid_parts,
+                    bpp_core::RigidTransform::identity(),
+                    properties,
+                ),
+            ])
+            .expect_err("invalid batch member rejects the entire batch");
+
+        assert!(matches!(
+            error,
+            PhysicsWorldError::InvalidConvexHull {
+                instance_id,
+                part_index: 0,
+            } if instance_id == InstanceId::new(2).expect("nonzero instance ID")
+        ));
+        assert_eq!(world.rigid_bodies.len(), rigid_body_count);
+        assert_eq!(world.colliders.len(), collider_count);
     }
 }

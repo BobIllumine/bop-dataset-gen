@@ -179,6 +179,7 @@ fn initial_pose_round_trips_within_documented_f32_tolerance() {
 
     let actual = world
         .body_pose(instance_id(1))
+        .expect("stored Rapier pose remains representable")
         .expect("inserted body has a pose");
     for (actual, expected) in actual
         .translation()
