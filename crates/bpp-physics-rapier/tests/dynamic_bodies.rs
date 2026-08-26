@@ -3,6 +3,7 @@
 use bpp_assets::ConvexPart;
 use bpp_core::{AssetId, InstanceId, ResolvedPhysicalProperties, RigidTransform, RunConfig};
 use bpp_physics_rapier::{DynamicBodySpec, PhysicsWorld, PhysicsWorldError};
+use std::time::Instant;
 
 /// Tolerance for finite `f32` values that round-trip through Rapier.
 const RAPIER_F32_TOLERANCE: f32 = 1.0e-5;
@@ -310,4 +311,31 @@ fn mixed_valid_and_invalid_batch_inserts_nothing() {
         } if id == instance_id(2)
     ));
     assert_unchanged(&world, &[]);
+}
+
+#[test]
+#[ignore = "manual non-gating release construction timing"]
+fn measure_one_hundred_two_part_body_world_construction() {
+    const BODY_COUNT: u16 = 100;
+
+    let asset_id = asset_id();
+    let parts = vec![tetrahedron(), tetrahedron()];
+    let bodies: Vec<_> = (1..=BODY_COUNT)
+        .map(|id| spec(instance_id(id), &asset_id, &parts))
+        .collect();
+
+    let world_start = Instant::now();
+    let mut world = PhysicsWorld::try_new(&bin()).expect("finite bin constructs");
+    let bin_elapsed = world_start.elapsed();
+    let insertion_start = Instant::now();
+    world
+        .insert_dynamic_bodies(&bodies)
+        .expect("representative body batch inserts");
+    let insertion_elapsed = insertion_start.elapsed();
+
+    assert_eq!(world.dynamic_body_count(), usize::from(BODY_COUNT));
+    eprintln!(
+        "serial Rapier construction: bin={bin_elapsed:?}, bodies={BODY_COUNT}, parts_per_body=2, insertion={insertion_elapsed:?}, total={:?}",
+        world_start.elapsed()
+    );
 }
