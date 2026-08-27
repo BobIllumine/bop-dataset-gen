@@ -8,3 +8,10 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["fast"]
+fast = ["bpp-physics-rapier/fast"]
+reproducible = ["bpp-physics-rapier/reproducible"]
+
+[dependencies]
+bpp-physics-rapier = { path = "../bpp-physics-rapier", default-features = false }

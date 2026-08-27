@@ -11,11 +11,13 @@ path = "src/main.rs"
 
 [features]
 default = ["fast", "wgpu"]
-fast = []
-reproducible = []
+fast = ["bpp-pipeline/fast"]
+reproducible = ["bpp-pipeline/reproducible"]
 wgpu = []
 blenderproc = []
 
 [lints]
 workspace = true
 
+[dependencies]
+bpp-pipeline = { path = "../bpp-pipeline", default-features = false }
