@@ -8,10 +8,10 @@ use bpp_core::{
 use serde::de::DeserializeOwned;
 
 const VALID_SCENE_JSON: &str = concat!(
-    r#"{"schema_version":1,"scene_id":9,"accepted_attempt":2,"seed_fingerprint":"seed-abc","bin":{"schema_version":1,"inner_dimensions_m":[1.0,2.0,3.0],"world_from_bin":{"translation":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]}},"instances":["#,
+    r#"{"schema_version":1,"scene_id":9,"accepted_attempt":2,"seed_fingerprint":"seed-abc","bin":{"schema_version":1,"inner_dimensions_m":[1.0,2.0,3.0],"floor_thickness_m":0.1,"wall_thickness_m":0.2,"world_from_bin":{"translation":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]},"material_label":"steel"},"instances":["#,
     r#"{"schema_version":1,"instance_id":2,"asset_id":"asset-a","world_from_model":{"translation":[2.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]},"physical_properties":{"schema_version":1,"mass_kg":1.5,"friction":0.6,"restitution":0.2}},"#,
     r#"{"schema_version":1,"instance_id":7,"asset_id":"asset-b","world_from_model":{"translation":[7.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]},"physical_properties":{"schema_version":1,"mass_kg":1.5,"friction":0.6,"restitution":0.2}}],"#,
-    r#""physics":{"schema_version":1,"attempts":22,"steps":50,"simulated_seconds":1.25,"final_max_linear_speed_mps":0.1,"final_max_angular_speed_rad_s":0.2,"rejection_counts":[{"schema_version":1,"reason":"spawn_saturation","count":1},{"schema_version":1,"reason":"non_finite_state","count":2},{"schema_version":1,"reason":"timeout","count":3},{"schema_version":1,"reason":"escape","count":4},{"schema_version":1,"reason":"excessive_penetration","count":5},{"schema_version":1,"reason":"invalid_final_state","count":6}]}}"#,
+    r#""physics":{"schema_version":1,"attempts":22,"steps":50,"simulated_seconds":1.25,"final_max_linear_speed_mps":0.1,"final_max_angular_speed_rad_s":0.2,"final_max_penetration_m":0.001,"rejection_counts":[{"schema_version":1,"reason":"spawn_saturation","count":1},{"schema_version":1,"reason":"non_finite_state","count":2},{"schema_version":1,"reason":"timeout","count":3},{"schema_version":1,"reason":"escape","count":4},{"schema_version":1,"reason":"excessive_penetration","count":5},{"schema_version":1,"reason":"invalid_final_state","count":6}]}}"#,
 );
 
 fn valid_scene() -> SceneSnapshot {
@@ -30,6 +30,7 @@ fn valid_scene() -> SceneSnapshot {
         1.25,
         0.1,
         0.2,
+        0.001,
         vec![
             RejectionCount::new(PhysicsRejectionReason::InvalidFinalState, 6),
             RejectionCount::new(PhysicsRejectionReason::ExcessivePenetration, 5),
@@ -45,7 +46,14 @@ fn valid_scene() -> SceneSnapshot {
         SceneId::new(9),
         AttemptId::new(2),
         "seed-abc",
-        BinSnapshot::try_new([1.0, 2.0, 3.0], RigidTransform::identity()).unwrap(),
+        BinSnapshot::try_new(
+            [1.0, 2.0, 3.0],
+            0.1,
+            0.2,
+            RigidTransform::identity(),
+            "steel",
+        )
+        .unwrap(),
         vec![instance(7, "asset-b"), instance(2, "asset-a")],
         report,
     )
@@ -83,7 +91,7 @@ fn physical_property_json_rejects_each_invalid_field() {
 fn bin_json_rejects_nonpositive_dimensions() {
     for dimensions in ["[0.0,2.0,3.0]", "[1.0,-2.0,3.0]"] {
         let json = format!(
-            r#"{{"schema_version":1,"inner_dimensions_m":{dimensions},"world_from_bin":{{"translation":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]}}}}"#
+            r#"{{"schema_version":1,"inner_dimensions_m":{dimensions},"floor_thickness_m":0.1,"wall_thickness_m":0.2,"world_from_bin":{{"translation":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]}},"material_label":"steel"}}"#
         );
         assert!(serde_json::from_str::<BinSnapshot>(&json).is_err());
     }
@@ -92,11 +100,11 @@ fn bin_json_rejects_nonpositive_dimensions() {
 #[test]
 fn physics_report_json_rejects_invalid_numerics_and_duplicate_reasons() {
     for json in [
-        r#"{"schema_version":1,"attempts":0,"steps":50,"simulated_seconds":1.0,"final_max_linear_speed_mps":0.1,"final_max_angular_speed_rad_s":0.2,"rejection_counts":[]}"#,
-        r#"{"schema_version":1,"attempts":1,"steps":50,"simulated_seconds":-1.0,"final_max_linear_speed_mps":0.1,"final_max_angular_speed_rad_s":0.2,"rejection_counts":[]}"#,
-        r#"{"schema_version":1,"attempts":1,"steps":50,"simulated_seconds":1.0,"final_max_linear_speed_mps":-0.1,"final_max_angular_speed_rad_s":0.2,"rejection_counts":[]}"#,
-        r#"{"schema_version":1,"attempts":1,"steps":50,"simulated_seconds":1.0,"final_max_linear_speed_mps":0.1,"final_max_angular_speed_rad_s":-0.2,"rejection_counts":[]}"#,
-        r#"{"schema_version":1,"attempts":2,"steps":50,"simulated_seconds":1.0,"final_max_linear_speed_mps":0.1,"final_max_angular_speed_rad_s":0.2,"rejection_counts":[{"schema_version":1,"reason":"escape","count":1},{"schema_version":1,"reason":"escape","count":2}]}"#,
+        r#"{"schema_version":1,"attempts":0,"steps":50,"simulated_seconds":1.0,"final_max_linear_speed_mps":0.1,"final_max_angular_speed_rad_s":0.2,"final_max_penetration_m":0.0,"rejection_counts":[]}"#,
+        r#"{"schema_version":1,"attempts":1,"steps":50,"simulated_seconds":-1.0,"final_max_linear_speed_mps":0.1,"final_max_angular_speed_rad_s":0.2,"final_max_penetration_m":0.0,"rejection_counts":[]}"#,
+        r#"{"schema_version":1,"attempts":1,"steps":50,"simulated_seconds":1.0,"final_max_linear_speed_mps":-0.1,"final_max_angular_speed_rad_s":0.2,"final_max_penetration_m":0.0,"rejection_counts":[]}"#,
+        r#"{"schema_version":1,"attempts":1,"steps":50,"simulated_seconds":1.0,"final_max_linear_speed_mps":0.1,"final_max_angular_speed_rad_s":-0.2,"final_max_penetration_m":0.0,"rejection_counts":[]}"#,
+        r#"{"schema_version":1,"attempts":2,"steps":50,"simulated_seconds":1.0,"final_max_linear_speed_mps":0.1,"final_max_angular_speed_rad_s":0.2,"final_max_penetration_m":0.0,"rejection_counts":[{"schema_version":1,"reason":"escape","count":1},{"schema_version":1,"reason":"escape","count":2}]}"#,
     ] {
         assert!(serde_json::from_str::<PhysicsReport>(json).is_err());
     }
@@ -108,7 +116,7 @@ fn scene_json_rejects_empty_seed_duplicate_ids_and_unsorted_instances() {
     let instance_7 = r#"{"schema_version":1,"instance_id":7,"asset_id":"asset-b","world_from_model":{"translation":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]},"physical_properties":{"schema_version":1,"mass_kg":1.0,"friction":0.5,"restitution":0.1}}"#;
     let scene = |seed: &str, instances: &str| {
         format!(
-            r#"{{"schema_version":1,"scene_id":9,"accepted_attempt":2,"seed_fingerprint":"{seed}","bin":{{"schema_version":1,"inner_dimensions_m":[1.0,2.0,3.0],"world_from_bin":{{"translation":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]}}}},"instances":[{instances}],"physics":{{"schema_version":1,"attempts":1,"steps":50,"simulated_seconds":1.0,"final_max_linear_speed_mps":0.1,"final_max_angular_speed_rad_s":0.2,"rejection_counts":[]}}}}"#
+            r#"{{"schema_version":1,"scene_id":9,"accepted_attempt":2,"seed_fingerprint":"{seed}","bin":{{"schema_version":1,"inner_dimensions_m":[1.0,2.0,3.0],"floor_thickness_m":0.1,"wall_thickness_m":0.2,"world_from_bin":{{"translation":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]}},"material_label":"steel"}},"instances":[{instances}],"physics":{{"schema_version":1,"attempts":1,"steps":50,"simulated_seconds":1.0,"final_max_linear_speed_mps":0.1,"final_max_angular_speed_rad_s":0.2,"final_max_penetration_m":0.0,"rejection_counts":[]}}}}"#
         )
     };
 
@@ -153,7 +161,7 @@ fn struct_json_rejects_unknown_fields() {
 
 #[test]
 fn scene_json_rejects_an_unsupported_nested_schema_version() {
-    let json = r#"{"schema_version":1,"scene_id":9,"accepted_attempt":2,"seed_fingerprint":"seed-abc","bin":{"schema_version":1,"inner_dimensions_m":[1.0,2.0,3.0],"world_from_bin":{"translation":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]}},"instances":[{"schema_version":1,"instance_id":2,"asset_id":"asset-a","world_from_model":{"translation":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]},"physical_properties":{"schema_version":2,"mass_kg":1.0,"friction":0.5,"restitution":0.1}}],"physics":{"schema_version":1,"attempts":1,"steps":50,"simulated_seconds":1.0,"final_max_linear_speed_mps":0.1,"final_max_angular_speed_rad_s":0.2,"rejection_counts":[]}}"#;
+    let json = r#"{"schema_version":1,"scene_id":9,"accepted_attempt":2,"seed_fingerprint":"seed-abc","bin":{"schema_version":1,"inner_dimensions_m":[1.0,2.0,3.0],"floor_thickness_m":0.1,"wall_thickness_m":0.2,"world_from_bin":{"translation":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]},"material_label":"steel"},"instances":[{"schema_version":1,"instance_id":2,"asset_id":"asset-a","world_from_model":{"translation":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]},"physical_properties":{"schema_version":2,"mass_kg":1.0,"friction":0.5,"restitution":0.1}}],"physics":{"schema_version":1,"attempts":1,"steps":50,"simulated_seconds":1.0,"final_max_linear_speed_mps":0.1,"final_max_angular_speed_rad_s":0.2,"final_max_penetration_m":0.0,"rejection_counts":[]}}"#;
 
     assert!(serde_json::from_str::<SceneSnapshot>(json).is_err());
 }

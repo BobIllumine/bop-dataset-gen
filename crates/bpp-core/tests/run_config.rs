@@ -273,7 +273,7 @@ fn explicit_run_and_physics_values_override_all_defaults() {
         )
         .replace(
             "[physics]\nsubsteps = 2\nsolver_iterations = 8",
-            "[physics]\nfixed_timestep_s = 0.005\nsubsteps = 2\nsolver_iterations = 8\nmin_steps = 100\nmax_steps = 1000\nstability_check_interval = 20\nlinear_sleep_threshold_mps = 0.02\nangular_sleep_threshold_rad_s = 0.03\nrequired_stable_checks = 5",
+            "[physics]\nfixed_timestep_s = 0.005\nsubsteps = 2\nsolver_iterations = 8\nmin_steps = 100\nmax_steps = 1000\nstability_check_interval = 20\nlinear_sleep_threshold_mps = 0.02\nangular_sleep_threshold_rad_s = 0.03\nrequired_stable_checks = 5\nescape_margin_m = 0.004\nmaximum_penetration_m = 0.006",
         );
     let config = RunConfig::from_toml(&toml).unwrap();
     let plan = config.plan();
@@ -285,6 +285,16 @@ fn explicit_run_and_physics_values_override_all_defaults() {
     assert_eq!(plan.physics().max_steps(), 1_000);
     assert_eq!(plan.physics().stability_check_interval(), 20);
     assert_eq!(plan.physics().required_stable_checks(), 5);
+    assert_float(plan.physics().escape_margin_m(), 0.004);
+    assert_float(plan.physics().maximum_penetration_m(), 0.006);
+}
+
+#[test]
+fn physics_validation_limits_default_to_two_millimetres() {
+    let config = RunConfig::from_toml(VALID_TOML).expect("valid literal v1 config");
+
+    assert_float(config.plan().physics().escape_margin_m(), 0.002);
+    assert_float(config.plan().physics().maximum_penetration_m(), 0.002);
 }
 
 #[test]

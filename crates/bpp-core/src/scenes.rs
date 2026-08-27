@@ -180,11 +180,14 @@ pub enum InvalidResolvedPhysicalPropertiesError {
 }
 
 /// Backend-neutral geometry and pose of the containing bin.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct BinSnapshot {
     schema_version: SchemaVersion,
     inner_dimensions_m: [PositiveMeters; 3],
+    floor_thickness_m: PositiveMeters,
+    wall_thickness_m: PositiveMeters,
     world_from_bin: RigidTransform,
+    material_label: String,
 }
 
 #[derive(Deserialize)]
@@ -193,7 +196,10 @@ struct BinSnapshotWire {
     #[serde(rename = "schema_version")]
     _schema_version: SchemaVersion,
     inner_dimensions_m: [f32; 3],
+    floor_thickness_m: f32,
+    wall_thickness_m: f32,
     world_from_bin: RigidTransform,
+    material_label: String,
 }
 
 impl<'de> Deserialize<'de> for BinSnapshot {
@@ -202,7 +208,14 @@ impl<'de> Deserialize<'de> for BinSnapshot {
         D: Deserializer<'de>,
     {
         let wire = BinSnapshotWire::deserialize(deserializer)?;
-        Self::try_new(wire.inner_dimensions_m, wire.world_from_bin).map_err(D::Error::custom)
+        Self::try_new(
+            wire.inner_dimensions_m,
+            wire.floor_thickness_m,
+            wire.wall_thickness_m,
+            wire.world_from_bin,
+            wire.material_label,
+        )
+        .map_err(D::Error::custom)
     }
 }
 
@@ -215,13 +228,22 @@ impl BinSnapshot {
     /// dimension.
     pub fn try_new(
         inner_dimensions_m: [f32; 3],
+        floor_thickness_m: f32,
+        wall_thickness_m: f32,
         world_from_bin: RigidTransform,
+        material_label: impl Into<String>,
     ) -> Result<Self, InvalidBinSnapshotError> {
         let [x, y, z] = inner_dimensions_m;
         let checked_dimension = |index, value| {
             PositiveMeters::try_new(value)
                 .map_err(|source| InvalidBinSnapshotError::InvalidInnerDimension { index, source })
         };
+        let material_label = material_label.into();
+        if material_label.trim().is_empty() {
+            return Err(InvalidBinSnapshotError::InvalidMaterialLabel {
+                value: material_label,
+            });
+        }
         Ok(Self {
             schema_version: SchemaVersion::current(),
             inner_dimensions_m: [
@@ -229,31 +251,54 @@ impl BinSnapshot {
                 checked_dimension(1, y)?,
                 checked_dimension(2, z)?,
             ],
+            floor_thickness_m: PositiveMeters::try_new(floor_thickness_m)
+                .map_err(InvalidBinSnapshotError::InvalidFloorThickness)?,
+            wall_thickness_m: PositiveMeters::try_new(wall_thickness_m)
+                .map_err(InvalidBinSnapshotError::InvalidWallThickness)?,
             world_from_bin,
+            material_label,
         })
     }
 
     /// Returns the wire-schema version.
     #[must_use]
-    pub const fn schema_version(self) -> SchemaVersion {
+    pub const fn schema_version(&self) -> SchemaVersion {
         self.schema_version
     }
 
     /// Returns positive inner `[x, y, z]` dimensions in metres.
     #[must_use]
-    pub const fn inner_dimensions_m(self) -> [PositiveMeters; 3] {
+    pub const fn inner_dimensions_m(&self) -> [PositiveMeters; 3] {
         self.inner_dimensions_m
+    }
+
+    /// Returns the positive floor thickness in metres.
+    #[must_use]
+    pub const fn floor_thickness_m(&self) -> PositiveMeters {
+        self.floor_thickness_m
+    }
+
+    /// Returns the positive wall thickness in metres.
+    #[must_use]
+    pub const fn wall_thickness_m(&self) -> PositiveMeters {
+        self.wall_thickness_m
     }
 
     /// Returns the transform from bin coordinates to world coordinates.
     #[must_use]
-    pub const fn world_from_bin(self) -> RigidTransform {
+    pub const fn world_from_bin(&self) -> RigidTransform {
         self.world_from_bin
+    }
+
+    /// Returns the nonblank configured material label.
+    #[must_use]
+    pub fn material_label(&self) -> &str {
+        &self.material_label
     }
 }
 
 /// Error returned when a bin snapshot contains an invalid dimension.
-#[derive(Clone, Copy, Debug, Error, PartialEq)]
+#[derive(Clone, Debug, Error, PartialEq)]
 pub enum InvalidBinSnapshotError {
     /// An inner dimension was non-finite or not strictly positive.
     #[error("inner_dimensions_m[{index}] is invalid: {source}")]
@@ -263,6 +308,18 @@ pub enum InvalidBinSnapshotError {
         /// The invalid positive-metre value.
         #[source]
         source: InvalidPositiveMetersError,
+    },
+    /// The floor thickness was non-finite or not strictly positive.
+    #[error("floor_thickness_m is invalid: {0}")]
+    InvalidFloorThickness(#[source] InvalidPositiveMetersError),
+    /// The wall thickness was non-finite or not strictly positive.
+    #[error("wall_thickness_m is invalid: {0}")]
+    InvalidWallThickness(#[source] InvalidPositiveMetersError),
+    /// The material label was empty or whitespace-only.
+    #[error("material_label must contain a non-whitespace character, got {value:?}")]
+    InvalidMaterialLabel {
+        /// Rejected label.
+        value: String,
     },
 }
 
@@ -435,6 +492,7 @@ pub struct PhysicsReport {
     simulated_seconds: f32,
     final_max_linear_speed_mps: f32,
     final_max_angular_speed_rad_s: f32,
+    final_max_penetration_m: f32,
     rejection_counts: Vec<RejectionCount>,
 }
 
@@ -448,6 +506,7 @@ struct PhysicsReportWire {
     simulated_seconds: f32,
     final_max_linear_speed_mps: f32,
     final_max_angular_speed_rad_s: f32,
+    final_max_penetration_m: f32,
     rejection_counts: Vec<RejectionCount>,
 }
 
@@ -463,6 +522,7 @@ impl<'de> Deserialize<'de> for PhysicsReport {
             wire.simulated_seconds,
             wire.final_max_linear_speed_mps,
             wire.final_max_angular_speed_rad_s,
+            wire.final_max_penetration_m,
             wire.rejection_counts,
         )
         .map_err(D::Error::custom)
@@ -485,6 +545,7 @@ impl PhysicsReport {
         simulated_seconds: f32,
         final_max_linear_speed_mps: f32,
         final_max_angular_speed_rad_s: f32,
+        final_max_penetration_m: f32,
         mut rejection_counts: Vec<RejectionCount>,
     ) -> Result<Self, InvalidPhysicsReportError> {
         if attempts == 0 {
@@ -505,6 +566,11 @@ impl PhysicsReport {
                 value: final_max_angular_speed_rad_s,
             }
         })?;
+        validate_nonnegative_finite(final_max_penetration_m).map_err(|()| {
+            InvalidPhysicsReportError::InvalidFinalMaxPenetration {
+                value: final_max_penetration_m,
+            }
+        })?;
 
         rejection_counts.sort_by_key(RejectionCount::reason);
         if let Some(duplicate) = rejection_counts
@@ -523,6 +589,7 @@ impl PhysicsReport {
             simulated_seconds: canonicalize_zero(simulated_seconds),
             final_max_linear_speed_mps: canonicalize_zero(final_max_linear_speed_mps),
             final_max_angular_speed_rad_s: canonicalize_zero(final_max_angular_speed_rad_s),
+            final_max_penetration_m: canonicalize_zero(final_max_penetration_m),
             rejection_counts,
         })
     }
@@ -563,6 +630,12 @@ impl PhysicsReport {
         self.final_max_angular_speed_rad_s
     }
 
+    /// Returns the final maximum contact penetration in metres.
+    #[must_use]
+    pub const fn final_max_penetration_m(&self) -> f32 {
+        self.final_max_penetration_m
+    }
+
     /// Returns rejection counts in deterministic rejection-reason order.
     #[must_use]
     pub fn rejection_counts(&self) -> &[RejectionCount] {
@@ -592,6 +665,12 @@ pub enum InvalidPhysicsReportError {
     #[error("final_max_angular_speed_rad_s must be finite and nonnegative, got {value}")]
     InvalidFinalMaxAngularSpeed {
         /// The rejected speed in radians per second.
+        value: f32,
+    },
+    /// The final maximum penetration was non-finite or negative.
+    #[error("final_max_penetration_m must be finite and nonnegative, got {value}")]
+    InvalidFinalMaxPenetration {
+        /// The rejected penetration in metres.
         value: f32,
     },
     /// A rejection reason appeared more than once.

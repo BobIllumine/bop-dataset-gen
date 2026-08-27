@@ -721,6 +721,12 @@
           "minimum": 0.0,
           "type": "number"
         },
+        "escape_margin_m": {
+          "default": 0.0020000000949949026,
+          "format": "float",
+          "minimum": 0.0,
+          "type": "number"
+        },
         "fixed_timestep_s": {
           "default": 0.004166666883975267,
           "exclusiveMinimum": 0.0,
@@ -738,6 +744,12 @@
           "format": "uint32",
           "minimum": 1,
           "type": "integer"
+        },
+        "maximum_penetration_m": {
+          "default": 0.0020000000949949026,
+          "format": "float",
+          "minimum": 0.0,
+          "type": "number"
         },
         "min_steps": {
           "default": 120,

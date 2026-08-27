@@ -9,6 +9,8 @@ pub(super) const DEFAULT_STABILITY_CHECK_INTERVAL: u32 = 24;
 pub(super) const DEFAULT_LINEAR_SLEEP_THRESHOLD_MPS: f32 = 0.01;
 pub(super) const DEFAULT_ANGULAR_SLEEP_THRESHOLD_RAD_S: f32 = 0.05;
 pub(super) const DEFAULT_REQUIRED_STABLE_CHECKS: u32 = 10;
+pub(super) const DEFAULT_ESCAPE_MARGIN_M: f32 = 0.002;
+pub(super) const DEFAULT_MAXIMUM_PENETRATION_M: f32 = 0.002;
 
 /// The complete unchecked v1 TOML input shape.
 ///
@@ -266,6 +268,19 @@ pub(super) struct PhysicsWire {
         )
     )]
     pub(super) required_stable_checks: Option<u32>,
+    #[cfg_attr(
+        feature = "schema",
+        schemars(range(min = 0.0), extend("default" = DEFAULT_ESCAPE_MARGIN_M))
+    )]
+    pub(super) escape_margin_m: Option<f32>,
+    #[cfg_attr(
+        feature = "schema",
+        schemars(
+            range(min = 0.0),
+            extend("default" = DEFAULT_MAXIMUM_PENETRATION_M)
+        )
+    )]
+    pub(super) maximum_penetration_m: Option<f32>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

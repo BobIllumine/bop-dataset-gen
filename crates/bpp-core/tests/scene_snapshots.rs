@@ -61,11 +61,24 @@ fn physical_properties_report_the_invalid_field() {
 #[test]
 fn bin_snapshot_checks_each_dimension_and_preserves_its_transform() {
     assert!(matches!(
-        BinSnapshot::try_new([1.0, 0.0, 3.0], RigidTransform::identity()),
+        BinSnapshot::try_new(
+            [1.0, 0.0, 3.0],
+            0.1,
+            0.2,
+            RigidTransform::identity(),
+            "steel",
+        ),
         Err(InvalidBinSnapshotError::InvalidInnerDimension { index: 1, .. })
     ));
 
-    let bin = BinSnapshot::try_new([1.0, 2.0, 3.0], RigidTransform::identity()).unwrap();
+    let bin = BinSnapshot::try_new(
+        [1.0, 2.0, 3.0],
+        0.1,
+        0.2,
+        RigidTransform::identity(),
+        "steel",
+    )
+    .unwrap();
     assert_eq!(bin.schema_version(), SchemaVersion::current());
     for (actual, expected) in bin
         .inner_dimensions_m()
@@ -76,6 +89,9 @@ fn bin_snapshot_checks_each_dimension_and_preserves_its_transform() {
         assert_same_float(actual, expected);
     }
     assert_eq!(bin.world_from_bin(), RigidTransform::identity());
+    assert_same_float(bin.floor_thickness_m().get(), 0.1);
+    assert_same_float(bin.wall_thickness_m().get(), 0.2);
+    assert_eq!(bin.material_label(), "steel");
 }
 
 #[test]
@@ -105,7 +121,9 @@ fn physics_report_validates_numerics_and_canonicalizes_rejection_order() {
         (1, 1.0, 0.1, -0.2),
     ];
     for (attempts, seconds, linear, angular) in invalid_cases {
-        assert!(PhysicsReport::try_new(attempts, 50, seconds, linear, angular, vec![]).is_err());
+        assert!(
+            PhysicsReport::try_new(attempts, 50, seconds, linear, angular, 0.0, vec![]).is_err()
+        );
     }
 
     assert!(matches!(
@@ -115,6 +133,7 @@ fn physics_report_validates_numerics_and_canonicalizes_rejection_order() {
             1.0,
             0.1,
             0.2,
+            0.0,
             vec![
                 RejectionCount::new(PhysicsRejectionReason::Escape, 1),
                 RejectionCount::new(PhysicsRejectionReason::Escape, 2),
@@ -131,6 +150,7 @@ fn physics_report_validates_numerics_and_canonicalizes_rejection_order() {
         1.25,
         0.1,
         0.2,
+        0.001,
         vec![
             RejectionCount::new(PhysicsRejectionReason::InvalidFinalState, 1),
             RejectionCount::new(PhysicsRejectionReason::SpawnSaturation, 3),
@@ -145,6 +165,7 @@ fn physics_report_validates_numerics_and_canonicalizes_rejection_order() {
     assert_same_float(report.simulated_seconds(), 1.25);
     assert_same_float(report.final_max_linear_speed_mps(), 0.1);
     assert_same_float(report.final_max_angular_speed_rad_s(), 0.2);
+    assert_same_float(report.final_max_penetration_m(), 0.001);
     assert_eq!(
         report
             .rejection_counts()
@@ -161,8 +182,15 @@ fn physics_report_validates_numerics_and_canonicalizes_rejection_order() {
 
 #[test]
 fn scene_construction_sorts_instances_and_rejects_invalid_identity_inputs() {
-    let bin = BinSnapshot::try_new([1.0, 2.0, 3.0], RigidTransform::identity()).unwrap();
-    let report = PhysicsReport::try_new(1, 50, 1.0, 0.1, 0.2, vec![]).unwrap();
+    let bin = BinSnapshot::try_new(
+        [1.0, 2.0, 3.0],
+        0.1,
+        0.2,
+        RigidTransform::identity(),
+        "steel",
+    )
+    .unwrap();
+    let report = PhysicsReport::try_new(1, 50, 1.0, 0.1, 0.2, 0.0, vec![]).unwrap();
     let properties = ResolvedPhysicalProperties::try_new(1.5, 0.6, 0.2).unwrap();
     let instance = |id, asset| {
         InstanceSnapshot::new(
@@ -178,7 +206,7 @@ fn scene_construction_sorts_instances_and_rejects_invalid_identity_inputs() {
             SceneId::new(9),
             AttemptId::new(2),
             "",
-            bin,
+            bin.clone(),
             vec![],
             report.clone(),
         ),
@@ -189,7 +217,7 @@ fn scene_construction_sorts_instances_and_rejects_invalid_identity_inputs() {
             SceneId::new(9),
             AttemptId::new(2),
             "seed-abc",
-            bin,
+            bin.clone(),
             vec![instance(2, "asset-b"), instance(2, "asset-c")],
             report.clone(),
         ),
@@ -201,7 +229,7 @@ fn scene_construction_sorts_instances_and_rejects_invalid_identity_inputs() {
         SceneId::new(9),
         AttemptId::new(2),
         "seed-abc",
-        bin,
+        bin.clone(),
         vec![instance(7, "asset-b"), instance(2, "asset-a")],
         report,
     )

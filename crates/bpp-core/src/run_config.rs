@@ -8,14 +8,14 @@ use thiserror::Error;
 use crate::run_config_wire::{
     AmbientWire, AppearanceWire, AssetWire, BinWire, BlenderProcRendererWire, CameraPoseWire,
     CameraProjectionWire, CameraWire, DEFAULT_ANGULAR_SLEEP_THRESHOLD_RAD_S,
-    DEFAULT_FIXED_TIMESTEP_S, DEFAULT_LINEAR_SLEEP_THRESHOLD_MPS, DEFAULT_MAX_STEPS,
-    DEFAULT_MIN_STEPS, DEFAULT_PLACEMENT_ATTEMPT_LIMIT, DEFAULT_REQUIRED_STABLE_CHECKS,
-    DEFAULT_SCENE_ATTEMPT_LIMIT, DEFAULT_STABILITY_CHECK_INTERVAL, DirectionalLightWire,
-    DistributionWire, ImageSizeWire, OutputWire, PbrMaterialWire,
-    PhysicalPropertyDistributionsWire, PhysicsWire, PointLightWire, PopulationWire, RenderersWire,
-    RunConfigWire, RunWire, ShellCameraPoseWire, SpawnVolumeWire, SurfacePhysicalPropertiesWire,
-    TransformWire, VhacdWire, WgpuAdapterPreferenceWire, WgpuDevicePreferenceWire,
-    WgpuRendererWire,
+    DEFAULT_ESCAPE_MARGIN_M, DEFAULT_FIXED_TIMESTEP_S, DEFAULT_LINEAR_SLEEP_THRESHOLD_MPS,
+    DEFAULT_MAX_STEPS, DEFAULT_MAXIMUM_PENETRATION_M, DEFAULT_MIN_STEPS,
+    DEFAULT_PLACEMENT_ATTEMPT_LIMIT, DEFAULT_REQUIRED_STABLE_CHECKS, DEFAULT_SCENE_ATTEMPT_LIMIT,
+    DEFAULT_STABILITY_CHECK_INTERVAL, DirectionalLightWire, DistributionWire, ImageSizeWire,
+    OutputWire, PbrMaterialWire, PhysicalPropertyDistributionsWire, PhysicsWire, PointLightWire,
+    PopulationWire, RenderersWire, RunConfigWire, RunWire, ShellCameraPoseWire, SpawnVolumeWire,
+    SurfacePhysicalPropertiesWire, TransformWire, VhacdWire, WgpuAdapterPreferenceWire,
+    WgpuDevicePreferenceWire, WgpuRendererWire,
 };
 use crate::{
     AmbientLight, AssetId, CameraId, CameraIntrinsics, DirectionalLight, Distribution,
@@ -756,6 +756,8 @@ pub struct PhysicsConfig {
     linear_sleep_threshold_mps: f32,
     angular_sleep_threshold_rad_s: f32,
     required_stable_checks: u32,
+    escape_margin_m: f32,
+    maximum_penetration_m: f32,
 }
 
 impl PhysicsConfig {
@@ -803,6 +805,16 @@ impl PhysicsConfig {
     #[must_use]
     pub const fn required_stable_checks(self) -> u32 {
         self.required_stable_checks
+    }
+    /// Returns the finite nonnegative escape guard margin in metres.
+    #[must_use]
+    pub const fn escape_margin_m(self) -> f32 {
+        self.escape_margin_m
+    }
+    /// Returns the finite nonnegative maximum final penetration in metres.
+    #[must_use]
+    pub const fn maximum_penetration_m(self) -> f32 {
+        self.maximum_penetration_m
     }
 
     fn try_from_wire(wire: PhysicsWire) -> Result<Self, RunConfigValidationError> {
@@ -860,6 +872,15 @@ impl PhysicsConfig {
             angular_sleep_threshold_rad_s,
             ConfigScalarField::PhysicsAngularSleepThreshold,
         )?;
+        let escape_margin_m = wire.escape_margin_m.unwrap_or(DEFAULT_ESCAPE_MARGIN_M);
+        nonnegative_f32(escape_margin_m, ConfigScalarField::PhysicsEscapeMargin)?;
+        let maximum_penetration_m = wire
+            .maximum_penetration_m
+            .unwrap_or(DEFAULT_MAXIMUM_PENETRATION_M);
+        nonnegative_f32(
+            maximum_penetration_m,
+            ConfigScalarField::PhysicsMaximumPenetration,
+        )?;
         Ok(Self {
             fixed_timestep_s,
             substeps: wire.substeps,
@@ -870,6 +891,8 @@ impl PhysicsConfig {
             linear_sleep_threshold_mps: canonicalize_zero(linear_sleep_threshold_mps),
             angular_sleep_threshold_rad_s: canonicalize_zero(angular_sleep_threshold_rad_s),
             required_stable_checks,
+            escape_margin_m: canonicalize_zero(escape_margin_m),
+            maximum_penetration_m: canonicalize_zero(maximum_penetration_m),
         })
     }
 }
@@ -1353,6 +1376,10 @@ pub enum ConfigScalarField {
     PhysicsLinearSleepThreshold,
     /// Physics angular sleep threshold.
     PhysicsAngularSleepThreshold,
+    /// Physics escape guard margin.
+    PhysicsEscapeMargin,
+    /// Physics maximum accepted final penetration.
+    PhysicsMaximumPenetration,
     /// Camera near plane.
     CameraNear,
     /// Camera far plane.
