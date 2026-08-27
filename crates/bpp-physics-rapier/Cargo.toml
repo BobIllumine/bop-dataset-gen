@@ -19,3 +19,6 @@ bpp-assets = { path = "../bpp-assets" }
 bpp-core = { path = "../bpp-core" }
 rapier3d = { version = "=0.35.2", default-features = false, features = ["dim3", "f32", "std"] }
 thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"

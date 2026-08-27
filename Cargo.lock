@@ -152,6 +152,7 @@ dependencies = [
  "bpp-assets",
  "bpp-core",
  "rapier3d",
+ "serde_json",
  "thiserror",
 ]
 

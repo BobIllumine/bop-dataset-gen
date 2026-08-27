@@ -1,6 +1,10 @@
 //! Public serial scene-generation integration contracts.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use bpp_assets::ConvexPart;
 use bpp_core::PhysicsRejectionReason;
@@ -240,4 +244,131 @@ fn construction_rejects_a_missing_selectable_prepared_asset() {
         SerialPhysicsGenerator::try_new(&plan, BTreeMap::new()),
         Err(SceneGenerationError::Placement(_))
     ));
+}
+
+fn corpus_plan() -> bpp_core::RunPlan {
+    parse_plan(
+        &config_toml()
+            .replace("scene_attempt_limit = 3", "scene_attempt_limit = 20")
+            .replace(
+                "placement_attempt_limit_per_object = 8",
+                "placement_attempt_limit_per_object = 500",
+            )
+            .replace(
+                "object_count = { kind = \"fixed\", value = 1 }",
+                "object_count = { kind = \"fixed\", value = 4 }",
+            ),
+    )
+}
+
+fn generate_corpus(generator: &SerialPhysicsGenerator) -> Vec<bpp_core::SceneSnapshot> {
+    (0..8)
+        .map(|scene| {
+            generator
+                .generate_scene(SceneId::new(scene))
+                .expect("primitive corpus scene is accepted")
+        })
+        .collect()
+}
+
+#[test]
+fn eight_scene_primitive_corpus_is_locked_serializable_and_schedule_independent() {
+    let plan = corpus_plan();
+    let generator = Arc::new(
+        SerialPhysicsGenerator::try_new(&plan, prepared_assets()).expect("generator compiles"),
+    );
+    let serial = generate_corpus(&generator);
+
+    let mut scheduled = (0..8)
+        .rev()
+        .map(|scene| {
+            let generator = Arc::clone(&generator);
+            std::thread::spawn(move || {
+                generator
+                    .generate_scene(SceneId::new(scene))
+                    .expect("scheduled primitive scene is accepted")
+            })
+        })
+        .map(|handle| handle.join().expect("scene worker does not panic"))
+        .collect::<Vec<_>>();
+    scheduled.sort_by_key(bpp_core::SceneSnapshot::scene_id);
+
+    assert_eq!(scheduled, serial);
+    assert!(serial.iter().all(|scene| scene.instances().len() == 4));
+    for scene in &serial {
+        let json = serde_json::to_vec(scene).expect("scene serializes");
+        let decoded: bpp_core::SceneSnapshot =
+            serde_json::from_slice(&json).expect("scene deserializes");
+        assert_scene_round_trip(scene, &decoded);
+    }
+    let bytes = serde_json::to_vec(&serial).expect("corpus serializes canonically");
+    let digest = blake3::hash(&bytes).to_hex().to_string();
+
+    #[cfg(feature = "fast")]
+    assert_eq!(
+        digest,
+        "d390de9fc435c2f446accdeb91b5e0d9d3b8c409bd3554ee8b36d977f24b1ecd"
+    );
+    #[cfg(feature = "reproducible")]
+    assert_eq!(
+        digest,
+        "7d1e7defc0a3fb83f8aa6a6a0f34eae94065dd3d29264b4dc0bc315d4c189100"
+    );
+}
+
+fn assert_scene_round_trip(expected: &bpp_core::SceneSnapshot, decoded: &bpp_core::SceneSnapshot) {
+    assert_eq!(decoded.scene_id(), expected.scene_id());
+    assert_eq!(decoded.accepted_attempt(), expected.accepted_attempt());
+    assert_eq!(decoded.seed_fingerprint(), expected.seed_fingerprint());
+    assert_eq!(decoded.bin(), expected.bin());
+    assert_eq!(decoded.physics(), expected.physics());
+    assert_eq!(decoded.instances().len(), expected.instances().len());
+    for (decoded, expected) in decoded.instances().iter().zip(expected.instances()) {
+        assert_eq!(decoded.instance_id(), expected.instance_id());
+        assert_eq!(decoded.asset_id(), expected.asset_id());
+        assert_eq!(
+            decoded.physical_properties(),
+            expected.physical_properties()
+        );
+        assert_eq!(
+            decoded
+                .world_from_model()
+                .translation()
+                .map(bpp_core::Meters::get)
+                .map(f32::to_bits),
+            expected
+                .world_from_model()
+                .translation()
+                .map(bpp_core::Meters::get)
+                .map(f32::to_bits)
+        );
+        let decoded_rotation = decoded.world_from_model().rotation_xyzw();
+        let expected_rotation = expected.world_from_model().rotation_xyzw();
+        assert!(
+            decoded_rotation
+                .into_iter()
+                .zip(expected_rotation)
+                .all(|(left, right)| (left - right).abs() <= 2.0 * f32::EPSILON)
+        );
+    }
+}
+
+#[test]
+#[ignore = "manual non-gating release serial-generator timing"]
+fn measure_eight_scene_four_object_primitive_corpus() {
+    let plan = corpus_plan();
+    let generator =
+        SerialPhysicsGenerator::try_new(&plan, prepared_assets()).expect("generator compiles");
+    let mut durations = Vec::with_capacity(5);
+    for _ in 0..5 {
+        let started = Instant::now();
+        let scenes = generate_corpus(&generator);
+        assert_eq!(scenes.len(), 8);
+        durations.push(started.elapsed());
+    }
+    durations.sort_unstable();
+    let median = durations[2];
+    let scenes_per_second = 8.0 / median.as_secs_f64();
+    eprintln!("serial primitive corpus median={median:?}, scenes/s={scenes_per_second:.2}");
+    assert!(median < Duration::from_secs(30));
 }
