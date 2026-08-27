@@ -4,6 +4,7 @@ mod analytic_bin;
 mod asset;
 mod cache_key;
 mod canonical;
+mod catalog;
 mod convex_cache;
 mod decomposition;
 mod errors;
@@ -20,6 +21,7 @@ pub use cache_key::{AssetCacheKey, AssetCacheKeyInput, AssetSourceFormat, asset_
 pub use canonical::{
     CanonicalVisualAsset, CanonicalizeVisualAssetError, canonicalize_visual_asset,
 };
+pub use catalog::{ResolvedAsset, ResolvedAssetCatalog, ResolvedAssetCatalogError};
 pub use convex_cache::{
     CacheDisposition, CachedConvexParts, ConvexCacheIoOperation, ConvexDecompositionCache,
     ConvexDecompositionCacheError,
