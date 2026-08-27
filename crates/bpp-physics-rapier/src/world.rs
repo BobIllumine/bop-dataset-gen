@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use bpp_assets::{AnalyticBinCollisionError, analytic_bin_collision};
-use bpp_core::{AssetId, BinConfig, InstanceId, ResolvedPhysicalProperties, RigidTransform};
+use bpp_core::{
+    AssetId, BinConfig, InstanceId, PhysicsConfig, ResolvedPhysicalProperties, RigidTransform,
+};
 use rapier3d::{
     na::{Isometry3, Quaternion, Translation3, UnitQuaternion, Vector3},
     prelude::{
@@ -90,6 +92,84 @@ struct PreparedDynamicBody {
     colliders: Vec<Collider>,
 }
 
+/// Result of advancing a world through its configured settling window.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum SettlingOutcome {
+    /// Every dynamic body satisfied the configured stability criterion.
+    Settled {
+        /// Logical steps advanced during this call.
+        steps: u32,
+        /// Stable checks observed consecutively at completion.
+        consecutive_stable_checks: u32,
+    },
+    /// The configured step budget was exhausted before settling.
+    MaximumStepsReached {
+        /// Logical steps advanced during this call.
+        steps: u32,
+        /// Stable checks observed consecutively at completion.
+        consecutive_stable_checks: u32,
+    },
+}
+
+impl SettlingOutcome {
+    /// Returns the logical step count advanced during this call.
+    #[must_use]
+    pub const fn steps(self) -> u32 {
+        match self {
+            Self::Settled { steps, .. } | Self::MaximumStepsReached { steps, .. } => steps,
+        }
+    }
+
+    /// Returns the final consecutive stable-check count for this call.
+    #[must_use]
+    pub const fn consecutive_stable_checks(self) -> u32 {
+        match self {
+            Self::Settled {
+                consecutive_stable_checks,
+                ..
+            }
+            | Self::MaximumStepsReached {
+                consecutive_stable_checks,
+                ..
+            } => consecutive_stable_checks,
+        }
+    }
+
+    /// Returns whether the world satisfied the configured settling criterion.
+    #[must_use]
+    pub const fn is_settled(self) -> bool {
+        matches!(self, Self::Settled { .. })
+    }
+}
+
+#[derive(Default)]
+struct StabilityState {
+    consecutive_stable_checks: u32,
+}
+
+impl StabilityState {
+    fn observe(&mut self, step: u32, interval: u32, stable: bool) -> bool {
+        if !step.is_multiple_of(interval) {
+            return false;
+        }
+        if stable {
+            self.consecutive_stable_checks += 1;
+        } else {
+            self.consecutive_stable_checks = 0;
+        }
+        true
+    }
+
+    const fn consecutive_stable_checks(&self) -> u32 {
+        self.consecutive_stable_checks
+    }
+
+    const fn can_settle(&self, step: u32, min_steps: u32, required_stable_checks: u32) -> bool {
+        step >= min_steps && self.consecutive_stable_checks >= required_stable_checks
+    }
+}
+
 /// A serial Rapier world containing the fixed analytic bin.
 #[allow(dead_code)]
 pub struct PhysicsWorld {
@@ -141,6 +221,12 @@ pub enum PhysicsWorldError {
         /// The stable instance ID whose Rapier body is missing.
         instance_id: InstanceId,
     },
+    /// The checked solver iteration count cannot be represented by Rapier.
+    #[error("solver iteration count {solver_iterations} cannot be represented by Rapier")]
+    SolverIterationsCannotFit {
+        /// The checked configured solver iteration count.
+        solver_iterations: u32,
+    },
 }
 
 impl PhysicsWorld {
@@ -188,6 +274,118 @@ impl PhysicsWorld {
             bin_collider_count: cuboids.len(),
             dynamic_bodies: BTreeMap::new(),
         })
+    }
+
+    /// Advances this world through its configured fixed logical steps.
+    ///
+    /// Each logical step is subdivided into the configured number of serial
+    /// Rapier pipeline calls, followed by its scheduled stability check.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PhysicsWorldError::SolverIterationsCannotFit`] when the
+    /// checked solver iteration count cannot be represented by Rapier, or
+    /// [`PhysicsWorldError::MissingRigidBody`] if internal dynamic-body
+    /// metadata no longer resolves to its Rapier body during a stability check.
+    pub fn settle(&mut self, config: PhysicsConfig) -> Result<SettlingOutcome, PhysicsWorldError> {
+        self.configure_integration_parameters(
+            config.fixed_timestep_s(),
+            config.substeps(),
+            config.solver_iterations(),
+        )?;
+
+        let mut stability = StabilityState::default();
+        for step in 1..=config.max_steps() {
+            for _ in 0..config.substeps() {
+                self.physics_pipeline.step(
+                    self.gravity.into(),
+                    &self.integration_parameters,
+                    &mut self.island_manager,
+                    &mut self.broad_phase,
+                    &mut self.narrow_phase,
+                    &mut self.rigid_bodies,
+                    &mut self.colliders,
+                    &mut self.impulse_joints,
+                    &mut self.multibody_joints,
+                    &mut self.ccd_solver,
+                    &(),
+                    &(),
+                );
+            }
+
+            if step.is_multiple_of(config.stability_check_interval()) {
+                let stable = self.dynamic_bodies_are_stable(
+                    config.linear_sleep_threshold_mps(),
+                    config.angular_sleep_threshold_rad_s(),
+                )?;
+                let checked = stability.observe(step, config.stability_check_interval(), stable);
+                debug_assert!(checked);
+                if stability.can_settle(step, config.min_steps(), config.required_stable_checks()) {
+                    return Ok(SettlingOutcome::Settled {
+                        steps: step,
+                        consecutive_stable_checks: stability.consecutive_stable_checks(),
+                    });
+                }
+            }
+        }
+
+        Ok(SettlingOutcome::MaximumStepsReached {
+            steps: config.max_steps(),
+            consecutive_stable_checks: stability.consecutive_stable_checks(),
+        })
+    }
+
+    fn configure_integration_parameters(
+        &mut self,
+        fixed_timestep_s: f32,
+        substeps: u32,
+        solver_iterations: u32,
+    ) -> Result<(), PhysicsWorldError> {
+        // Rapier's `Real` is f32 while the checked public configuration keeps
+        // its nonzero substep count as u32. This conversion is required at the
+        // API boundary and occurs once per `settle` call, outside its hot loop.
+        #[allow(clippy::cast_precision_loss)]
+        let substeps = substeps as Real;
+        self.integration_parameters.dt = fixed_timestep_s / substeps;
+        self.integration_parameters.num_solver_iterations = usize::try_from(solver_iterations)
+            .map_err(|_| PhysicsWorldError::SolverIterationsCannotFit { solver_iterations })?;
+        Ok(())
+    }
+
+    fn dynamic_bodies_are_stable(
+        &self,
+        linear_threshold: f32,
+        angular_threshold: f32,
+    ) -> Result<bool, PhysicsWorldError> {
+        let linear_threshold_squared = f64::from(linear_threshold).powi(2);
+        let angular_threshold_squared = f64::from(angular_threshold).powi(2);
+
+        for (&instance_id, metadata) in &self.dynamic_bodies {
+            let body = self
+                .rigid_bodies
+                .get(metadata.body_handle)
+                .ok_or(PhysicsWorldError::MissingRigidBody { instance_id })?;
+            let linear = body.linvel();
+            let angular = body.angvel();
+            let components = [
+                linear.x, linear.y, linear.z, angular.x, angular.y, angular.z,
+            ];
+            if !components.into_iter().all(f32::is_finite) {
+                return Ok(false);
+            }
+            let linear_squared = f64::from(linear.x).powi(2)
+                + f64::from(linear.y).powi(2)
+                + f64::from(linear.z).powi(2);
+            let angular_squared = f64::from(angular.x).powi(2)
+                + f64::from(angular.y).powi(2)
+                + f64::from(angular.z).powi(2);
+            if linear_squared > linear_threshold_squared
+                || angular_squared > angular_threshold_squared
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Returns the world's constant Z-up gravitational acceleration in m/s².
@@ -367,13 +565,115 @@ fn rigid_transform_from_isometry(
 mod tests {
     use bpp_assets::{ConvexPart, analytic_bin_collision};
     use bpp_core::{AssetId, InstanceId, ResolvedPhysicalProperties, RunConfig};
-    use rapier3d::na::Isometry3;
+    use rapier3d::na::{Isometry3, Vector3};
 
     use super::{
         DynamicBodySpec, PhysicsWorld, PhysicsWorldError, rigid_transform_from_isometry,
         rigid_transform_to_isometry,
     };
     use crate::PreparedPhysicsAsset;
+
+    use super::StabilityState;
+
+    #[test]
+    fn stability_state_checks_only_divisible_one_based_steps() {
+        let mut state = StabilityState::default();
+
+        assert!(!state.observe(1, 2, true));
+        assert_eq!(state.consecutive_stable_checks(), 0);
+        assert!(state.observe(2, 2, true));
+        assert_eq!(state.consecutive_stable_checks(), 1);
+        assert!(!state.observe(3, 2, false));
+        assert_eq!(state.consecutive_stable_checks(), 1);
+        assert!(state.observe(4, 2, false));
+        assert_eq!(state.consecutive_stable_checks(), 0);
+    }
+
+    #[test]
+    fn stable_checks_before_minimum_steps_accumulate_without_settling_early() {
+        let mut state = StabilityState::default();
+
+        assert!(state.observe(1, 1, true));
+        assert!(!state.can_settle(1, 3, 2));
+        assert!(state.observe(2, 1, true));
+        assert!(!state.can_settle(2, 3, 2));
+        assert!(state.can_settle(3, 3, 2));
+    }
+
+    #[test]
+    fn exact_velocity_threshold_equality_is_stable() {
+        let instance_id = InstanceId::new(1).expect("nonzero instance ID");
+        let mut world = world_with_one_dynamic_body(instance_id);
+        let body_handle = world.dynamic_bodies[&instance_id].body_handle;
+        world.rigid_bodies[body_handle].set_linvel(Vector3::new(3.0, 4.0, 0.0).into(), true);
+
+        assert!(
+            world
+                .dynamic_bodies_are_stable(5.0, 0.0)
+                .expect("stored body exists")
+        );
+    }
+
+    #[test]
+    fn one_representable_velocity_value_above_threshold_is_unstable() {
+        let instance_id = InstanceId::new(1).expect("nonzero instance ID");
+        let mut world = world_with_one_dynamic_body(instance_id);
+        let body_handle = world.dynamic_bodies[&instance_id].body_handle;
+        let above = f32::from_bits(5.0_f32.to_bits() + 1);
+        world.rigid_bodies[body_handle].set_linvel(Vector3::new(above, 0.0, 0.0).into(), true);
+
+        assert!(
+            !world
+                .dynamic_bodies_are_stable(5.0, 0.0)
+                .expect("stored body exists")
+        );
+    }
+
+    #[test]
+    fn nonfinite_velocity_is_unstable() {
+        let instance_id = InstanceId::new(1).expect("nonzero instance ID");
+        let mut world = world_with_one_dynamic_body(instance_id);
+        let body_handle = world.dynamic_bodies[&instance_id].body_handle;
+        world.rigid_bodies[body_handle].set_linvel(Vector3::new(f32::NAN, 0.0, 0.0).into(), true);
+
+        assert!(
+            !world
+                .dynamic_bodies_are_stable(100.0, 100.0)
+                .expect("stored body exists")
+        );
+    }
+
+    #[test]
+    fn one_unstable_body_prevents_an_otherwise_stable_population_from_settling() {
+        let first = InstanceId::new(1).expect("nonzero instance ID");
+        let second = InstanceId::new(2).expect("nonzero instance ID");
+        let mut world = world_with_dynamic_bodies(&[first, second]);
+        let second_handle = world.dynamic_bodies[&second].body_handle;
+        world.rigid_bodies[second_handle].set_angvel(Vector3::new(0.0, 0.0, 2.0).into(), true);
+
+        assert!(
+            !world
+                .dynamic_bodies_are_stable(0.0, 1.0)
+                .expect("stored bodies exist")
+        );
+    }
+
+    #[test]
+    fn configured_solver_iterations_and_substep_duration_reach_rapier() {
+        let mut world =
+            PhysicsWorld::try_new(&bin([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], 0.5, 0.1))
+                .expect("finite bin constructs");
+
+        world
+            .configure_integration_parameters(0.1, 4, 3)
+            .expect("checked solver iteration count fits");
+
+        assert_eq!(
+            world.integration_parameters.dt.to_bits(),
+            0.025_f32.to_bits()
+        );
+        assert_eq!(world.integration_parameters.num_solver_iterations, 3);
+    }
 
     fn bin(
         translation: [f32; 3],
@@ -459,6 +759,49 @@ visible_instances = false
             .into_plan()
             .bin()
             .clone()
+    }
+
+    fn world_with_one_dynamic_body(instance_id: InstanceId) -> PhysicsWorld {
+        world_with_dynamic_bodies(&[instance_id])
+    }
+
+    fn world_with_dynamic_bodies(instance_ids: &[InstanceId]) -> PhysicsWorld {
+        let asset_id = AssetId::new("part").expect("nonempty asset ID");
+        let properties = ResolvedPhysicalProperties::try_new(2.5, 0.73, 0.27)
+            .expect("valid physical properties");
+        let parts = vec![
+            ConvexPart::try_new(
+                vec![
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+                vec![0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3],
+            )
+            .expect("tetrahedron is checked"),
+        ];
+        let asset = PreparedPhysicsAsset::try_new(&parts).expect("asset prepares once");
+        let mut world =
+            PhysicsWorld::try_new(&bin([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], 0.5, 0.1))
+                .expect("finite bin constructs");
+        let bodies = instance_ids
+            .iter()
+            .copied()
+            .map(|instance_id| {
+                DynamicBodySpec::new(
+                    instance_id,
+                    &asset_id,
+                    &asset,
+                    bpp_core::RigidTransform::identity(),
+                    properties,
+                )
+            })
+            .collect::<Vec<_>>();
+        world
+            .insert_dynamic_bodies(&bodies)
+            .expect("checked body inserts");
+        world
     }
 
     #[test]
