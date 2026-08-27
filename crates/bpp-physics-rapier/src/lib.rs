@@ -10,4 +10,7 @@ mod world;
 pub use placement::{PlacedInstance, PlacementPlan, PlacementPlanner, PlacementPlanningError};
 pub use population::{PlannedInstance, PopulationPlan, PopulationPlanner, PopulationPlanningError};
 pub use prepared_asset::{PhysicsAssetPreparationError, PreparedPhysicsAsset};
-pub use world::{DynamicBodySpec, PhysicsWorld, PhysicsWorldError, SettlingOutcome};
+pub use world::{
+    DynamicBodySpec, FinalStateMetrics, FinalStateValidationError, PhysicsWorld, PhysicsWorldError,
+    SettlingOutcome,
+};

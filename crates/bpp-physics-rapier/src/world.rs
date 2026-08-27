@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bpp_assets::{AnalyticBinCollisionError, analytic_bin_collision};
 use bpp_core::{
-    AssetId, BinConfig, InstanceId, PhysicsConfig, ResolvedPhysicalProperties, RigidTransform,
+    AssetId, BinConfig, InstanceId, Meters, PhysicsConfig, PhysicsRejectionReason,
+    ResolvedPhysicalProperties, RigidTransform,
 };
 use rapier3d::{
     na::{Isometry3, Quaternion, Translation3, UnitQuaternion, Vector3},
@@ -110,6 +111,85 @@ pub enum SettlingOutcome {
         /// Stable checks observed consecutively at completion.
         consecutive_stable_checks: u32,
     },
+}
+
+/// Finite aggregate measurements from an accepted final physical state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FinalStateMetrics {
+    linear_speed_mps: f32,
+    angular_speed_rad_s: f32,
+    penetration_m: f32,
+}
+
+impl FinalStateMetrics {
+    /// Returns the greatest dynamic-body linear speed in metres per second.
+    #[must_use]
+    pub const fn max_linear_speed_mps(self) -> f32 {
+        self.linear_speed_mps
+    }
+
+    /// Returns the greatest dynamic-body angular speed in radians per second.
+    #[must_use]
+    pub const fn max_angular_speed_rad_s(self) -> f32 {
+        self.angular_speed_rad_s
+    }
+
+    /// Returns the greatest active-contact penetration depth in metres.
+    #[must_use]
+    pub const fn max_penetration_m(self) -> f32 {
+        self.penetration_m
+    }
+}
+
+/// Reason a settled physical world cannot be published as a scene snapshot.
+#[derive(Clone, Debug, Error, PartialEq)]
+#[non_exhaustive]
+pub enum FinalStateValidationError {
+    /// A dynamic body contains a non-finite pose or velocity component.
+    #[error("dynamic body {instance_id:?} contains a non-finite final state")]
+    NonFiniteState {
+        /// Stable identity of the invalid body.
+        instance_id: InstanceId,
+    },
+    /// A body's collision bounds no longer intersect the bin guard prism.
+    #[error("dynamic body {instance_id:?} escaped the bin guard prism")]
+    Escaped {
+        /// Stable identity of the escaped body.
+        instance_id: InstanceId,
+    },
+    /// A final contact penetrates more deeply than configured.
+    #[error(
+        "contact between {first:?} and {second:?} penetrates {depth_m} m, above limit {limit_m} m"
+    )]
+    ExcessivePenetration {
+        /// First dynamic instance, or `None` for the fixed bin.
+        first: Option<InstanceId>,
+        /// Second dynamic instance, or `None` for the fixed bin.
+        second: Option<InstanceId>,
+        /// Observed penetration depth in metres.
+        depth_m: f32,
+        /// Configured inclusive limit in metres.
+        limit_m: f32,
+    },
+    /// Stored body/collider metadata is internally inconsistent.
+    #[error("invalid final physics state: {message}")]
+    InvalidFinalState {
+        /// Stable diagnostic without backend handles in the public type.
+        message: String,
+    },
+}
+
+impl FinalStateValidationError {
+    /// Maps the detailed validation error to its deterministic report category.
+    #[must_use]
+    pub const fn rejection_reason(&self) -> PhysicsRejectionReason {
+        match self {
+            Self::NonFiniteState { .. } => PhysicsRejectionReason::NonFiniteState,
+            Self::Escaped { .. } => PhysicsRejectionReason::Escape,
+            Self::ExcessivePenetration { .. } => PhysicsRejectionReason::ExcessivePenetration,
+            Self::InvalidFinalState { .. } => PhysicsRejectionReason::InvalidFinalState,
+        }
+    }
 }
 
 impl SettlingOutcome {
@@ -335,6 +415,185 @@ impl PhysicsWorld {
         })
     }
 
+    /// Validates all dynamic bodies and returns aggregate final-state measurements.
+    ///
+    /// Escape is defined geometrically: each body's union collider AABB must
+    /// intersect the open bin's outer guard prism, expanded by the configured
+    /// escape margin. Final contact penetration is accepted inclusively at the
+    /// configured limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns a deterministic typed rejection for non-finite state, excessive
+    /// penetration, escape, or inconsistent internal metadata.
+    pub fn validate_final_state(
+        &self,
+        bin: &BinConfig,
+        config: PhysicsConfig,
+    ) -> Result<FinalStateMetrics, FinalStateValidationError> {
+        let world_to_bin = bin.world_from_bin().inverse().ok_or_else(|| {
+            FinalStateValidationError::InvalidFinalState {
+                message: "bin transform has no finite inverse".to_owned(),
+            }
+        })?;
+        let dimensions = bin.inner_dimensions_m().map(bpp_core::PositiveMeters::get);
+        let margin = config.escape_margin_m();
+        let guard_min = [
+            -dimensions[0] / 2.0 - bin.wall_thickness_m().get() - margin,
+            -dimensions[1] / 2.0 - bin.wall_thickness_m().get() - margin,
+            -bin.floor_thickness_m().get() - margin,
+        ];
+        let guard_max = [
+            dimensions[0] / 2.0 + bin.wall_thickness_m().get() + margin,
+            dimensions[1] / 2.0 + bin.wall_thickness_m().get() + margin,
+            dimensions[2] + margin,
+        ];
+
+        let (max_linear_squared, max_angular_squared, first_escape) =
+            self.validate_dynamic_bodies(world_to_bin, guard_min, guard_max)?;
+        let deepest = self.deepest_contact();
+        if penetration_exceeds_limit(deepest.0, config.maximum_penetration_m()) {
+            return Err(FinalStateValidationError::ExcessivePenetration {
+                first: deepest.1,
+                second: deepest.2,
+                depth_m: deepest.0,
+                limit_m: config.maximum_penetration_m(),
+            });
+        }
+        if let Some(instance_id) = first_escape {
+            return Err(FinalStateValidationError::Escaped { instance_id });
+        }
+
+        Ok(FinalStateMetrics {
+            linear_speed_mps: canonicalize_zero_f64(max_linear_squared.sqrt()),
+            angular_speed_rad_s: canonicalize_zero_f64(max_angular_squared.sqrt()),
+            penetration_m: deepest.0,
+        })
+    }
+
+    fn validate_dynamic_bodies(
+        &self,
+        world_to_bin: RigidTransform,
+        guard_min: [f32; 3],
+        guard_max: [f32; 3],
+    ) -> Result<(f64, f64, Option<InstanceId>), FinalStateValidationError> {
+        let mut max_linear_squared = 0.0_f64;
+        let mut max_angular_squared = 0.0_f64;
+        let mut first_escape = None;
+        for (&instance_id, metadata) in &self.dynamic_bodies {
+            let body = self.rigid_bodies.get(metadata.body_handle).ok_or_else(|| {
+                invalid_final_state(format!(
+                    "body metadata for {instance_id:?} has no rigid body"
+                ))
+            })?;
+            let position = body.position();
+            let rotation = position.rotation;
+            let linear = body.linvel();
+            let angular = body.angvel();
+            if ![
+                position.translation.x,
+                position.translation.y,
+                position.translation.z,
+                rotation.x,
+                rotation.y,
+                rotation.z,
+                rotation.w,
+                linear.x,
+                linear.y,
+                linear.z,
+                angular.x,
+                angular.y,
+                angular.z,
+            ]
+            .into_iter()
+            .all(f32::is_finite)
+            {
+                return Err(FinalStateValidationError::NonFiniteState { instance_id });
+            }
+            max_linear_squared = max_linear_squared.max(norm_squared(linear.x, linear.y, linear.z));
+            max_angular_squared =
+                max_angular_squared.max(norm_squared(angular.x, angular.y, angular.z));
+
+            let mut body_min = [f32::INFINITY; 3];
+            let mut body_max = [f32::NEG_INFINITY; 3];
+            if metadata.collider_handles.is_empty() {
+                return Err(invalid_final_state(format!(
+                    "body metadata for {instance_id:?} has no colliders"
+                )));
+            }
+            for &handle in &metadata.collider_handles {
+                let collider = self.colliders.get(handle).ok_or_else(|| {
+                    invalid_final_state(format!(
+                        "body metadata for {instance_id:?} has a missing collider"
+                    ))
+                })?;
+                let aabb = collider.compute_aabb();
+                for x in [aabb.mins.x, aabb.maxs.x] {
+                    for y in [aabb.mins.y, aabb.maxs.y] {
+                        for z in [aabb.mins.z, aabb.maxs.z] {
+                            let point = [x, y, z].map(Meters::new);
+                            let Some([x, y, z]) = point[0]
+                                .zip(point[1])
+                                .zip(point[2])
+                                .and_then(|((x, y), z)| world_to_bin.transform_point([x, y, z]))
+                            else {
+                                return Err(FinalStateValidationError::NonFiniteState {
+                                    instance_id,
+                                });
+                            };
+                            for (axis, value) in [x.get(), y.get(), z.get()].into_iter().enumerate()
+                            {
+                                body_min[axis] = body_min[axis].min(value);
+                                body_max[axis] = body_max[axis].max(value);
+                            }
+                        }
+                    }
+                }
+            }
+            if (0..3)
+                .any(|axis| body_max[axis] < guard_min[axis] || body_min[axis] > guard_max[axis])
+            {
+                first_escape.get_or_insert(instance_id);
+            }
+        }
+        Ok((max_linear_squared, max_angular_squared, first_escape))
+    }
+
+    fn deepest_contact(&self) -> (f32, Option<InstanceId>, Option<InstanceId>) {
+        let mut deepest = (0.0_f32, None, None);
+        for pair in self.narrow_phase.contact_pairs() {
+            let (first, second) = ordered_contact_instances(
+                self.instance_for_collider(pair.collider1),
+                self.instance_for_collider(pair.collider2),
+            );
+            if first.is_none() && second.is_none() {
+                continue;
+            }
+            for contact in pair
+                .manifolds
+                .iter()
+                .flat_map(|manifold| manifold.points.iter())
+            {
+                let depth = (-contact.dist).max(0.0);
+                if depth > deepest.0 {
+                    deepest = (depth, first, second);
+                }
+            }
+        }
+        deepest
+    }
+
+    fn instance_for_collider(&self, handle: ColliderHandle) -> Option<InstanceId> {
+        self.dynamic_bodies
+            .iter()
+            .find_map(|(&instance_id, metadata)| {
+                metadata
+                    .collider_handles
+                    .contains(&handle)
+                    .then_some(instance_id)
+            })
+    }
+
     fn configure_integration_parameters(
         &mut self,
         fixed_timestep_s: f32,
@@ -533,6 +792,35 @@ impl PhysicsWorld {
     }
 }
 
+fn invalid_final_state(message: String) -> FinalStateValidationError {
+    FinalStateValidationError::InvalidFinalState { message }
+}
+
+fn norm_squared(x: f32, y: f32, z: f32) -> f64 {
+    f64::from(x).powi(2) + f64::from(y).powi(2) + f64::from(z).powi(2)
+}
+
+fn penetration_exceeds_limit(depth_m: f32, limit_m: f32) -> bool {
+    depth_m > limit_m
+}
+
+fn ordered_contact_instances(
+    first: Option<InstanceId>,
+    second: Option<InstanceId>,
+) -> (Option<InstanceId>, Option<InstanceId>) {
+    if first <= second {
+        (first, second)
+    } else {
+        (second, first)
+    }
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn canonicalize_zero_f64(value: f64) -> f32 {
+    let value = value as f32;
+    if value == 0.0 { 0.0 } else { value }
+}
+
 fn rigid_transform_to_isometry(
     transform: RigidTransform,
 ) -> Result<Isometry3<Real>, PhysicsWorldError> {
@@ -568,8 +856,8 @@ mod tests {
     use rapier3d::na::{Isometry3, Vector3};
 
     use super::{
-        DynamicBodySpec, PhysicsWorld, PhysicsWorldError, rigid_transform_from_isometry,
-        rigid_transform_to_isometry,
+        DynamicBodySpec, FinalStateValidationError, PhysicsWorld, PhysicsWorldError,
+        penetration_exceeds_limit, rigid_transform_from_isometry, rigid_transform_to_isometry,
     };
     use crate::PreparedPhysicsAsset;
 
@@ -659,6 +947,74 @@ mod tests {
     }
 
     #[test]
+    fn penetration_limit_is_inclusive_at_equality() {
+        let limit = 0.002_f32;
+
+        assert!(!penetration_exceeds_limit(limit, limit));
+        assert!(penetration_exceeds_limit(
+            f32::from_bits(limit.to_bits() + 1),
+            limit
+        ));
+    }
+
+    #[test]
+    fn final_state_rejects_nonfinite_body_state_before_geometry() {
+        let instance_id = InstanceId::new(1).expect("nonzero instance ID");
+        let mut world = world_with_one_dynamic_body(instance_id);
+        let body_handle = world.dynamic_bodies[&instance_id].body_handle;
+        world.rigid_bodies[body_handle].set_linvel(Vector3::new(f32::NAN, 0.0, 0.0).into(), true);
+        let plan = test_plan([0.0; 3], [0.0, 0.0, 0.0, 1.0], 0.5, 0.1);
+
+        assert!(matches!(
+            world.validate_final_state(plan.bin(), *plan.physics()),
+            Err(FinalStateValidationError::NonFiniteState { instance_id: id }) if id == instance_id
+        ));
+    }
+
+    #[test]
+    fn final_state_reports_missing_stored_body_as_invalid_state() {
+        let instance_id = InstanceId::new(1).expect("nonzero instance ID");
+        let mut world = world_with_one_dynamic_body(instance_id);
+        let body_handle = world.dynamic_bodies[&instance_id].body_handle;
+        world.rigid_bodies.remove(
+            body_handle,
+            &mut world.island_manager,
+            &mut world.colliders,
+            &mut world.impulse_joints,
+            &mut world.multibody_joints,
+            true,
+        );
+        let plan = test_plan([0.0; 3], [0.0, 0.0, 0.0, 1.0], 0.5, 0.1);
+
+        assert!(matches!(
+            world.validate_final_state(plan.bin(), *plan.physics()),
+            Err(FinalStateValidationError::InvalidFinalState { .. })
+        ));
+    }
+
+    #[test]
+    fn final_state_metrics_take_component_complete_multi_body_maxima() {
+        let first = InstanceId::new(1).expect("nonzero instance ID");
+        let second = InstanceId::new(2).expect("nonzero instance ID");
+        let mut world = world_with_dynamic_bodies(&[first, second]);
+        let first_handle = world.dynamic_bodies[&first].body_handle;
+        let second_handle = world.dynamic_bodies[&second].body_handle;
+        world.rigid_bodies[first_handle].set_linvel(Vector3::new(3.0, 4.0, 0.0).into(), true);
+        world.rigid_bodies[second_handle].set_angvel(Vector3::new(0.0, 0.0, 12.0).into(), true);
+        let plan = test_plan([0.0; 3], [0.0, 0.0, 0.0, 1.0], 0.5, 0.1);
+
+        let metrics = world
+            .validate_final_state(plan.bin(), *plan.physics())
+            .expect("finite bodies inside the bin are measurable");
+
+        assert_eq!(metrics.max_linear_speed_mps().to_bits(), 5.0_f32.to_bits());
+        assert_eq!(
+            metrics.max_angular_speed_rad_s().to_bits(),
+            12.0_f32.to_bits()
+        );
+    }
+
+    #[test]
     fn configured_solver_iterations_and_substep_duration_reach_rapier() {
         let mut world =
             PhysicsWorld::try_new(&bin([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], 0.5, 0.1))
@@ -681,6 +1037,17 @@ mod tests {
         friction: f32,
         restitution: f32,
     ) -> bpp_core::BinConfig {
+        test_plan(translation, rotation_xyzw, friction, restitution)
+            .bin()
+            .clone()
+    }
+
+    fn test_plan(
+        translation: [f32; 3],
+        rotation_xyzw: [f32; 4],
+        friction: f32,
+        restitution: f32,
+    ) -> bpp_core::RunPlan {
         let [tx, ty, tz] = translation;
         let [rx, ry, rz, rw] = rotation_xyzw;
         let input = format!(
@@ -757,8 +1124,6 @@ visible_instances = false
         RunConfig::from_toml(&input)
             .expect("test configuration parses")
             .into_plan()
-            .bin()
-            .clone()
     }
 
     fn world_with_one_dynamic_body(instance_id: InstanceId) -> PhysicsWorld {
