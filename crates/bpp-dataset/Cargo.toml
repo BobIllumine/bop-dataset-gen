@@ -10,8 +10,12 @@ workspace = true
 
 [dependencies]
 bpp-core = { path = "../bpp-core" }
+blake3 = "=1.8.7"
 exr = "=1.74.0"
 png = "=0.18.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
 
 [dev-dependencies]
 tempfile = "3"

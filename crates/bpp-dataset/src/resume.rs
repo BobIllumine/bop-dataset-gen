@@ -1,0 +1,380 @@
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{self, Write},
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+use bpp_core::{BackendInfo, SceneId};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
+use thiserror::Error;
+
+const MANIFEST_SCHEMA_VERSION: u32 = 1;
+const CONFIG_FINGERPRINT_DOMAIN: &[u8] = b"bpp.dataset.resolved-config.v1";
+static NEXT_MANIFEST_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Immutable run identity used to reject incompatible dataset resumes.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct DatasetManifest {
+    schema_version: u32,
+    resolved_config_fingerprint: String,
+    asset_catalog_fingerprint: String,
+    backend: BackendInfo,
+    total_scene_count: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DatasetManifestWire {
+    schema_version: u32,
+    resolved_config_fingerprint: String,
+    asset_catalog_fingerprint: String,
+    backend: BackendInfo,
+    total_scene_count: u64,
+}
+
+impl<'de> Deserialize<'de> for DatasetManifest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = DatasetManifestWire::deserialize(deserializer)?;
+        let manifest = Self {
+            schema_version: wire.schema_version,
+            resolved_config_fingerprint: wire.resolved_config_fingerprint,
+            asset_catalog_fingerprint: wire.asset_catalog_fingerprint,
+            backend: wire.backend,
+            total_scene_count: wire.total_scene_count,
+        };
+        manifest.validate_loaded().map_err(D::Error::custom)?;
+        Ok(manifest)
+    }
+}
+
+impl DatasetManifest {
+    /// Creates a manifest from canonical resolved-config bytes and provenance.
+    ///
+    /// The caller owns canonical serialization of the resolved configuration;
+    /// any byte change intentionally creates an incompatible run identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for a blank asset fingerprint or zero scenes.
+    pub fn try_new(
+        resolved_config_bytes: &[u8],
+        asset_catalog_fingerprint: impl Into<String>,
+        backend: BackendInfo,
+        total_scene_count: u64,
+    ) -> Result<Self, DatasetManifestError> {
+        let asset_catalog_fingerprint = asset_catalog_fingerprint.into();
+        if asset_catalog_fingerprint.trim().is_empty() {
+            return Err(DatasetManifestError::BlankAssetCatalogFingerprint);
+        }
+        if total_scene_count == 0 {
+            return Err(DatasetManifestError::ZeroScenes);
+        }
+        Ok(Self {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            resolved_config_fingerprint: fingerprint_config(resolved_config_bytes),
+            asset_catalog_fingerprint,
+            backend,
+            total_scene_count,
+        })
+    }
+
+    /// Returns the lowercase hexadecimal resolved-config fingerprint.
+    #[must_use]
+    pub fn resolved_config_fingerprint(&self) -> &str {
+        &self.resolved_config_fingerprint
+    }
+
+    /// Returns the immutable resolved asset-catalog fingerprint.
+    #[must_use]
+    pub fn asset_catalog_fingerprint(&self) -> &str {
+        &self.asset_catalog_fingerprint
+    }
+
+    /// Returns renderer provenance participating in resume compatibility.
+    #[must_use]
+    pub const fn backend(&self) -> &BackendInfo {
+        &self.backend
+    }
+
+    /// Returns the complete scene-ID domain `0..total_scene_count`.
+    #[must_use]
+    pub const fn total_scene_count(&self) -> u64 {
+        self.total_scene_count
+    }
+
+    fn validate_loaded(&self) -> Result<(), DatasetManifestError> {
+        if self.schema_version != MANIFEST_SCHEMA_VERSION {
+            return Err(DatasetManifestError::UnsupportedSchemaVersion {
+                value: self.schema_version,
+            });
+        }
+        if self.resolved_config_fingerprint.len() != 64
+            || !self
+                .resolved_config_fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(DatasetManifestError::InvalidResolvedConfigFingerprint);
+        }
+        if self.asset_catalog_fingerprint.trim().is_empty() {
+            return Err(DatasetManifestError::BlankAssetCatalogFingerprint);
+        }
+        if self.total_scene_count == 0 {
+            return Err(DatasetManifestError::ZeroScenes);
+        }
+        Ok(())
+    }
+}
+
+/// Why an in-memory or stored dataset manifest is invalid.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum DatasetManifestError {
+    /// The asset catalog fingerprint contains no non-whitespace text.
+    #[error("asset catalog fingerprint must not be blank")]
+    BlankAssetCatalogFingerprint,
+    /// A run cannot contain zero scenes.
+    #[error("total scene count must be nonzero")]
+    ZeroScenes,
+    /// Stored manifest schema is unsupported.
+    #[error("unsupported dataset manifest schema version {value}")]
+    UnsupportedSchemaVersion {
+        /// Rejected version.
+        value: u32,
+    },
+    /// Stored resolved-config fingerprint is not lowercase BLAKE3 hex.
+    #[error("resolved config fingerprint must be 64 lowercase hexadecimal characters")]
+    InvalidResolvedConfigFingerprint,
+}
+
+/// Sorted view of committed and pending scenes for a compatible run.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DatasetResumeIndex {
+    manifest: DatasetManifest,
+    committed_scenes: Vec<SceneId>,
+}
+
+impl DatasetResumeIndex {
+    /// Creates a new run manifest or resumes an exactly compatible one.
+    ///
+    /// Only canonical twenty-digit directories below `scenes/` count as
+    /// committed. Private `.staging` contents never participate in resume.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed I/O, manifest, compatibility, or scene-directory error.
+    pub fn open_or_create(
+        dataset_root: &Path,
+        requested: DatasetManifest,
+    ) -> Result<Self, DatasetOpenError> {
+        requested.validate_loaded()?;
+        fs::create_dir_all(dataset_root).map_err(|source| DatasetOpenError::Io {
+            path: dataset_root.to_owned(),
+            source,
+        })?;
+        let manifest_path = dataset_root.join("run.json");
+        let manifest = if install_manifest_atomically(dataset_root, &manifest_path, &requested)? {
+            requested
+        } else {
+            let bytes = fs::read(&manifest_path).map_err(|source| DatasetOpenError::Io {
+                path: manifest_path.clone(),
+                source,
+            })?;
+            let existing: DatasetManifest =
+                serde_json::from_slice(&bytes).map_err(DatasetOpenError::ParseManifest)?;
+            existing.validate_loaded()?;
+            if existing != requested {
+                return Err(DatasetOpenError::IncompatibleManifest {
+                    existing: Box::new(existing),
+                    requested: Box::new(requested),
+                });
+            }
+            existing
+        };
+
+        let scenes_path = dataset_root.join("scenes");
+        fs::create_dir_all(&scenes_path).map_err(|source| DatasetOpenError::Io {
+            path: scenes_path.clone(),
+            source,
+        })?;
+        let mut committed_scenes = Vec::new();
+        let entries = fs::read_dir(&scenes_path).map_err(|source| DatasetOpenError::Io {
+            path: scenes_path.clone(),
+            source,
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|source| DatasetOpenError::Io {
+                path: scenes_path.clone(),
+                source,
+            })?;
+            let file_type = entry.file_type().map_err(|source| DatasetOpenError::Io {
+                path: entry.path(),
+                source,
+            })?;
+            if !file_type.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name
+                .to_str()
+                .ok_or_else(|| DatasetOpenError::InvalidSceneDirectory { path: entry.path() })?;
+            let value = parse_scene_directory(name, manifest.total_scene_count)
+                .ok_or_else(|| DatasetOpenError::InvalidSceneDirectory { path: entry.path() })?;
+            committed_scenes.push(SceneId::new(value));
+        }
+        committed_scenes.sort_unstable();
+        Ok(Self {
+            manifest,
+            committed_scenes,
+        })
+    }
+
+    /// Returns immutable run identity and provenance.
+    #[must_use]
+    pub const fn manifest(&self) -> &DatasetManifest {
+        &self.manifest
+    }
+
+    /// Returns committed scenes in ascending identifier order.
+    #[must_use]
+    pub fn committed_scenes(&self) -> &[SceneId] {
+        &self.committed_scenes
+    }
+
+    /// Iterates missing scene identifiers in ascending order without allocation.
+    pub fn pending_scenes(&self) -> impl Iterator<Item = SceneId> + '_ {
+        (0..self.manifest.total_scene_count).filter_map(|value| {
+            let scene_id = SceneId::new(value);
+            self.committed_scenes
+                .binary_search(&scene_id)
+                .is_err()
+                .then_some(scene_id)
+        })
+    }
+}
+
+/// Failure to initialize or resume a dataset run.
+#[derive(Debug, Error)]
+pub enum DatasetOpenError {
+    /// Filesystem access failed.
+    #[error("dataset I/O failed at {path}: {source}")]
+    Io {
+        /// Path involved in the failure.
+        path: PathBuf,
+        /// Underlying I/O error.
+        #[source]
+        source: io::Error,
+    },
+    /// A new manifest could not be serialized.
+    #[error("dataset manifest serialization failed: {0}")]
+    SerializeManifest(serde_json::Error),
+    /// A stored manifest is malformed JSON or has the wrong shape.
+    #[error("stored dataset manifest is invalid: {0}")]
+    ParseManifest(serde_json::Error),
+    /// A stored manifest violates checked field invariants.
+    #[error(transparent)]
+    InvalidManifest(#[from] DatasetManifestError),
+    /// Existing immutable run identity differs from the requested run.
+    #[error("existing dataset manifest is incompatible with the requested run")]
+    IncompatibleManifest {
+        /// Existing stored identity.
+        existing: Box<DatasetManifest>,
+        /// Newly requested identity.
+        requested: Box<DatasetManifest>,
+    },
+    /// A committed-scene directory name is malformed or outside the run domain.
+    #[error("invalid committed scene directory {path}")]
+    InvalidSceneDirectory {
+        /// Rejected directory path.
+        path: PathBuf,
+    },
+}
+
+fn fingerprint_config(bytes: &[u8]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(CONFIG_FINGERPRINT_DOMAIN);
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+    hasher.finalize().to_hex().to_string()
+}
+
+fn install_manifest_atomically(
+    dataset_root: &Path,
+    manifest_path: &Path,
+    manifest: &DatasetManifest,
+) -> Result<bool, DatasetOpenError> {
+    if manifest_path.exists() {
+        return Ok(false);
+    }
+    let mut bytes = serde_json::to_vec(manifest).map_err(DatasetOpenError::SerializeManifest)?;
+    bytes.push(b'\n');
+    for _ in 0..1024 {
+        let nonce = NEXT_MANIFEST_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let temporary =
+            dataset_root.join(format!(".run.json-{}-{nonce:020}.tmp", std::process::id()));
+        let mut file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(source) => {
+                return Err(DatasetOpenError::Io {
+                    path: temporary,
+                    source,
+                });
+            }
+        };
+        if let Err(source) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
+            let _ = fs::remove_file(&temporary);
+            return Err(DatasetOpenError::Io {
+                path: temporary,
+                source,
+            });
+        }
+        let installed = match fs::hard_link(&temporary, manifest_path) {
+            Ok(()) => true,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
+            Err(source) => {
+                let _ = fs::remove_file(&temporary);
+                return Err(DatasetOpenError::Io {
+                    path: manifest_path.to_owned(),
+                    source,
+                });
+            }
+        };
+        let _ = fs::remove_file(&temporary);
+        if installed {
+            sync_directory(dataset_root)?;
+        }
+        return Ok(installed);
+    }
+    Err(DatasetOpenError::Io {
+        path: dataset_root.to_owned(),
+        source: io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not allocate a unique manifest staging file after 1024 attempts",
+        ),
+    })
+}
+
+fn parse_scene_directory(name: &str, total_scene_count: u64) -> Option<u64> {
+    if name.len() != 20 || !name.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let value = name.parse::<u64>().ok()?;
+    (value < total_scene_count && name == format!("{value:020}")).then_some(value)
+}
+
+fn sync_directory(path: &Path) -> Result<(), DatasetOpenError> {
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|source| DatasetOpenError::Io {
+            path: path.to_owned(),
+            source,
+        })
+}

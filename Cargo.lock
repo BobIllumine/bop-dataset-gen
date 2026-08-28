@@ -150,10 +150,14 @@ dependencies = [
 name = "bpp-dataset"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "bpp-core",
  "exr",
  "png",
+ "serde",
+ "serde_json",
  "tempfile",
+ "thiserror",
 ]
 
 [[package]]
