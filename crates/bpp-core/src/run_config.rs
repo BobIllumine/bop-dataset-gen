@@ -1126,6 +1126,29 @@ pub struct WgpuRendererConfig {
 }
 
 impl WgpuRendererConfig {
+    /// Creates checked `wgpu` renderer options without initializing a device.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidWgpuRendererConfigError::ZeroShadowMapSize`] when the
+    /// shadow-map resolution is zero.
+    pub const fn try_new(
+        device_preference: WgpuDevicePreference,
+        adapter_preference: WgpuAdapterPreference,
+        shadow_map_size: u32,
+        rgb_fxaa: bool,
+    ) -> Result<Self, InvalidWgpuRendererConfigError> {
+        if shadow_map_size == 0 {
+            return Err(InvalidWgpuRendererConfigError::ZeroShadowMapSize);
+        }
+        Ok(Self {
+            device_preference,
+            adapter_preference,
+            shadow_map_size,
+            rgb_fxaa,
+        })
+    }
+
     /// Returns the device preference.
     #[must_use]
     pub const fn device_preference(self) -> WgpuDevicePreference {
@@ -1166,6 +1189,14 @@ impl WgpuRendererConfig {
             rgb_fxaa: wire.rgb_fxaa,
         })
     }
+}
+
+/// Error returned when programmatic `wgpu` renderer options are invalid.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum InvalidWgpuRendererConfigError {
+    /// Shadow maps require a nonzero square resolution.
+    #[error("shadow_map_size must be nonzero")]
+    ZeroShadowMapSize,
 }
 
 /// Checked `BlenderProc` worker process options without starting a process.
