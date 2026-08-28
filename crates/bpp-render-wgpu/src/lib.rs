@@ -1,6 +1,6 @@
 //! Headless wgpu renderer implementation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::{
     num::NonZeroU32,
     sync::mpsc,
@@ -94,6 +94,18 @@ struct ReadbackFrame {
     depth: Vec<f32>,
     instance: Vec<u16>,
 }
+
+struct PendingReadback {
+    submission: wgpu::SubmissionIndex,
+    rgb: ReadbackBuffer,
+    depth: ReadbackBuffer,
+    instance: ReadbackBuffer,
+    rgb_mapping: mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+    depth_mapping: mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+    instance_mapping: mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+}
+
+const READBACK_RING_CAPACITY: usize = 3;
 
 struct DrawCall<'a> {
     primitive: &'a GpuPrimitive,
@@ -332,6 +344,7 @@ impl WgpuRenderer {
         self.prepared.as_ref().map(|prepared| prepared.stats)
     }
 
+    #[cfg(test)]
     fn render_clear_targets(
         &self,
         width: u32,
@@ -341,6 +354,7 @@ impl WgpuRenderer {
         self.render_targets(width, height, background_srgb, None, &[], &[])
     }
 
+    #[cfg(test)]
     fn render_targets(
         &self,
         width: u32,
@@ -350,6 +364,26 @@ impl WgpuRenderer {
         draw_uniforms: &[DrawUniform],
         draw_calls: &[DrawCall<'_>],
     ) -> Result<ReadbackFrame, WgpuReadbackError> {
+        self.begin_render_targets(
+            width,
+            height,
+            background_srgb,
+            camera,
+            draw_uniforms,
+            draw_calls,
+        )?
+        .finish(&self.device)
+    }
+
+    fn begin_render_targets(
+        &self,
+        width: u32,
+        height: u32,
+        background_srgb: [f32; 4],
+        camera: Option<&CameraUniform>,
+        draw_uniforms: &[DrawUniform],
+        draw_calls: &[DrawCall<'_>],
+    ) -> Result<PendingReadback, WgpuReadbackError> {
         let extent = wgpu::Extent3d {
             width,
             height,
@@ -410,28 +444,14 @@ impl WgpuRenderer {
         let rgb_mapping = rgb_readback.begin_read();
         let depth_mapping = depth_readback.begin_read();
         let instance_mapping = instance_readback.begin_read();
-        self.device.poll(wgpu::PollType::Wait {
-            submission_index: Some(submission),
-            timeout: Some(Duration::from_secs(30)),
-        })?;
-        let rgba8 = rgb_readback.finish_read(&rgb_mapping)?;
-        let depth_bytes = depth_readback.finish_read(&depth_mapping)?;
-        let instance_bytes = instance_readback.finish_read(&instance_mapping)?;
-        let depth = depth_bytes
-            .chunks_exact(4)
-            .map(|bytes| f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-            .collect();
-        let instance = instance_bytes
-            .chunks_exact(4)
-            .map(|bytes| u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-            .map(|value| {
-                u16::try_from(value).map_err(|_| WgpuReadbackError::InstanceIdOverflow { value })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(ReadbackFrame {
-            rgba8,
-            depth,
-            instance,
+        Ok(PendingReadback {
+            submission,
+            rgb: rgb_readback,
+            depth: depth_readback,
+            instance: instance_readback,
+            rgb_mapping,
+            depth_mapping,
+            instance_mapping,
         })
     }
 
@@ -532,12 +552,12 @@ impl WgpuRenderer {
         }
     }
 
-    fn render_camera(
+    fn begin_camera(
         &self,
         camera: &CameraSnapshot,
         scene: &SceneSnapshot,
         appearance: &AppearanceSnapshot,
-    ) -> Result<ReadbackFrame, WgpuSceneError> {
+    ) -> Result<PendingReadback, WgpuSceneError> {
         let prepared = self.prepared.as_ref().ok_or(WgpuSceneError::NotPrepared)?;
         let mut uniforms = Vec::new();
         let mut calls = Vec::new();
@@ -569,16 +589,19 @@ impl WgpuRenderer {
         let size = camera.image_size();
         if uniforms.is_empty() {
             return self
-                .render_clear_targets(
+                .begin_render_targets(
                     size.width(),
                     size.height(),
                     appearance.background_srgb().rgba(),
+                    None,
+                    &[],
+                    &[],
                 )
                 .map_err(WgpuSceneError::Readback);
         }
         let camera_from_world = rigid_matrix(camera.camera_from_world().camera_from_world());
         let camera_uniform = camera_uniform(camera, appearance, camera_from_world)?;
-        self.render_targets(
+        self.begin_render_targets(
             size.width(),
             size.height(),
             appearance.background_srgb().rgba(),
@@ -587,6 +610,46 @@ impl WgpuRenderer {
             &calls,
         )
         .map_err(WgpuSceneError::Readback)
+    }
+
+    #[cfg(test)]
+    fn render_camera(
+        &self,
+        camera: &CameraSnapshot,
+        scene: &SceneSnapshot,
+        appearance: &AppearanceSnapshot,
+    ) -> Result<ReadbackFrame, WgpuSceneError> {
+        self.begin_camera(camera, scene, appearance)?
+            .finish(&self.device)
+            .map_err(WgpuSceneError::Readback)
+    }
+}
+
+impl PendingReadback {
+    fn finish(self, device: &wgpu::Device) -> Result<ReadbackFrame, WgpuReadbackError> {
+        device.poll(wgpu::PollType::Wait {
+            submission_index: Some(self.submission),
+            timeout: Some(Duration::from_secs(30)),
+        })?;
+        let rgba8 = self.rgb.finish_read(&self.rgb_mapping)?;
+        let depth_bytes = self.depth.finish_read(&self.depth_mapping)?;
+        let instance_bytes = self.instance.finish_read(&self.instance_mapping)?;
+        let depth = depth_bytes
+            .chunks_exact(4)
+            .map(|bytes| f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            .collect();
+        let instance = instance_bytes
+            .chunks_exact(4)
+            .map(|bytes| u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            .map(|value| {
+                u16::try_from(value).map_err(|_| WgpuReadbackError::InstanceIdOverflow { value })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ReadbackFrame {
+            rgba8,
+            depth,
+            instance,
+        })
     }
 }
 
@@ -722,11 +785,26 @@ impl Renderer for WgpuRenderer {
             .require(request.required_channels(), camera_count)?;
         let render_started = Instant::now();
         let mut rendered = Vec::with_capacity(request.cameras().len());
+        let mut pending = VecDeque::with_capacity(READBACK_RING_CAPACITY);
         for camera in request.cameras() {
-            let frame = self
-                .render_camera(camera, request.scene(), request.appearance())
+            let readback = self
+                .begin_camera(camera, request.scene(), request.appearance())
                 .map_err(map_scene_error)?;
-            rendered.push((*camera, frame));
+            pending.push_back((*camera, readback));
+            if pending.len() == READBACK_RING_CAPACITY {
+                let (completed_camera, completed) =
+                    pending.pop_front().expect("the readback ring is nonempty");
+                let frame = completed
+                    .finish(&self.device)
+                    .map_err(|error| map_scene_error(WgpuSceneError::Readback(error)))?;
+                rendered.push((completed_camera, frame));
+            }
+        }
+        while let Some((camera, readback)) = pending.pop_front() {
+            let frame = readback
+                .finish(&self.device)
+                .map_err(|error| map_scene_error(WgpuSceneError::Readback(error)))?;
+            rendered.push((camera, frame));
         }
         let render_seconds = checked_duration(render_started.elapsed())?;
         let encode_started = Instant::now();
@@ -1574,7 +1652,18 @@ mod tests {
     #[ignore = "manual hardware-dependent transactional dataset acceptance test"]
     fn renderer_pipeline_commits_a_validated_canonical_scene() {
         const REQUEST: &str = r#"{"schema_version":1,"scene":{"schema_version":1,"scene_id":1,"accepted_attempt":0,"seed_fingerprint":"seed","bin":{"schema_version":1,"inner_dimensions_m":[1.0,1.0,1.0],"floor_thickness_m":0.1,"wall_thickness_m":0.1,"world_from_bin":{"translation":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]},"material_label":"steel"},"instances":[{"schema_version":1,"instance_id":1,"asset_id":"triangle","world_from_model":{"translation":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]},"physical_properties":{"schema_version":1,"mass_kg":1.0,"friction":0.5,"restitution":0.0}}],"physics":{"schema_version":1,"attempts":1,"steps":1,"simulated_seconds":0.01,"final_max_linear_speed_mps":0.0,"final_max_angular_speed_rad_s":0.0,"final_max_penetration_m":0.0,"rejection_counts":[]}},"cameras":[{"schema_version":1,"camera_id":0,"image_size":{"width":32,"height":32},"k":[25.0,0.0,16.0,0.0,25.0,16.0,0.0,0.0,1.0],"camera_from_world":{"camera_from_world":{"translation":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]}},"near_m":0.1,"far_m":10.0}],"appearance":{"schema_version":1,"background_srgb":[0.0,0.0,0.0,1.0],"ambient_light":{"schema_version":1,"color":[1.0,1.0,1.0],"intensity":1.0},"directional_lights":[],"point_lights":[]},"required_channels":{"schema_version":1,"rgb":true,"depth":true,"instance":true}}"#;
-        let request: RenderSceneRequest = serde_json::from_str(REQUEST).unwrap();
+        let mut request_json: serde_json::Value = serde_json::from_str(REQUEST).unwrap();
+        let template = request_json["cameras"][0].clone();
+        request_json["cameras"] = serde_json::Value::Array(
+            (0..3)
+                .map(|camera_id| {
+                    let mut camera = template.clone();
+                    camera["camera_id"] = serde_json::Value::from(camera_id);
+                    camera
+                })
+                .collect(),
+        );
+        let request: RenderSceneRequest = serde_json::from_value(request_json).unwrap();
         let config = bpp_core::WgpuRendererConfig::try_new(
             WgpuDevicePreference::Automatic,
             WgpuAdapterPreference::HighPerformance,
@@ -1603,5 +1692,10 @@ mod tests {
         Renderer::render_scene(&mut renderer, &request, &staging).unwrap();
         bpp_dataset::validate_and_write_checksums(&staging, &request).unwrap();
         assert!(staging.root().join("checksums.json").is_file());
+        for camera in request.cameras() {
+            assert!(staging.rgb_path(camera.camera_id()).is_file());
+            assert!(staging.depth_path(camera.camera_id()).is_file());
+            assert!(staging.instance_path(camera.camera_id()).is_file());
+        }
     }
 }

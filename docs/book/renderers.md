@@ -26,9 +26,11 @@ pipeline, and uploaded asset catalog. Adapter selection is deterministic within
 the requested CPU/GPU and power class. Explicit classes are hard requirements.
 The render pass writes aligned `Rgba8UnormSrgb`, `R32Float`, and `R32Uint`
 targets with a `Depth32Float` visibility buffer. Instance values are checked
-before conversion to the canonical `u16` frame. All three channel buffers are
-mapped together after one bounded submission wait; row padding is removed on
-the CPU before encoding.
+before conversion to the canonical `u16` frame. Each camera's three channel
+buffers are mapped together, and a fixed three-frame readback ring submits
+later cameras before waiting on the oldest frame. This bounds GPU staging
+memory while overlapping rendering and mapping across cameras. Row padding is
+removed on the CPU before encoding.
 
 The shader supports base-color factors, metallic/roughness response, ambient
 light, and up to eight directional plus eight inverse-square point lights.
