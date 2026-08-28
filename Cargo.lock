@@ -176,7 +176,15 @@ dependencies = [
 name = "bpp-pipeline"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "bpp-assets",
+ "bpp-core",
+ "bpp-dataset",
  "bpp-physics-rapier",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
