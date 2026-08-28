@@ -45,9 +45,10 @@ pub use run_config::{
     AppearanceConfig, AppearanceField, AssetConfig, Axis, BinConfig, BlenderProcRendererConfig,
     CameraConfig, CameraPose, CameraProjection, CameraShellField, ConfigCountField,
     ConfigDistributionError, ConfigPathField, ConfigScalarField, ConfigTextField,
-    ConfigTransformField, DistributionField, InvalidWgpuRendererConfigError, PbrMaterialConfig,
-    PhysicalPropertyDistributions, PhysicsConfig, PopulationConfig, RendererConfigs, RunConfig,
-    RunConfigError, RunConfigValidationError, RunPlan, RunSettings, ShellCameraPose, SpawnVolume,
+    ConfigTransformField, DistributionField, InvalidBlenderProcRendererConfigError,
+    InvalidWgpuRendererConfigError, PbrMaterialConfig, PhysicalPropertyDistributions,
+    PhysicsConfig, PopulationConfig, RendererConfigs, RunConfig, RunConfigError,
+    RunConfigValidationError, RunPlan, RunSettings, ShellCameraPose, SpawnVolume,
     SurfacePhysicalProperties, VerticalFovDegrees, VhacdParameters, WgpuAdapterPreference,
     WgpuDevicePreference, WgpuRendererConfig,
 };

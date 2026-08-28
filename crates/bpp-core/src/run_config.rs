@@ -1211,6 +1211,50 @@ pub struct BlenderProcRendererConfig {
 }
 
 impl BlenderProcRendererConfig {
+    /// Constructs checked programmatic worker options.
+    ///
+    /// # Errors
+    ///
+    /// Returns a field-specific error for invalid paths, text, deadlines, or bounds.
+    pub fn try_new(
+        executable_path: impl Into<PathBuf>,
+        worker_path: impl Into<PathBuf>,
+        device_selection: impl Into<String>,
+        handshake_timeout_s: f32,
+        request_timeout_s: f32,
+        stderr_tail_capacity: u32,
+    ) -> Result<Self, InvalidBlenderProcRendererConfigError> {
+        let executable_path = executable_path.into();
+        let worker_path = worker_path.into();
+        let device_selection = device_selection.into();
+        if executable_path.as_os_str().is_empty() {
+            return Err(InvalidBlenderProcRendererConfigError::EmptyExecutablePath);
+        }
+        if worker_path.as_os_str().is_empty() {
+            return Err(InvalidBlenderProcRendererConfigError::EmptyWorkerPath);
+        }
+        if device_selection.trim().is_empty() {
+            return Err(InvalidBlenderProcRendererConfigError::BlankDeviceSelection);
+        }
+        if !handshake_timeout_s.is_finite() || handshake_timeout_s <= 0.0 {
+            return Err(InvalidBlenderProcRendererConfigError::InvalidHandshakeTimeout);
+        }
+        if !request_timeout_s.is_finite() || request_timeout_s <= 0.0 {
+            return Err(InvalidBlenderProcRendererConfigError::InvalidRequestTimeout);
+        }
+        if stderr_tail_capacity == 0 {
+            return Err(InvalidBlenderProcRendererConfigError::ZeroStderrTailCapacity);
+        }
+        Ok(Self {
+            executable_path,
+            worker_path,
+            device_selection,
+            handshake_timeout_s,
+            request_timeout_s,
+            stderr_tail_capacity,
+        })
+    }
+
     /// Returns the nonempty executable path.
     #[must_use]
     pub fn executable_path(&self) -> &Path {
@@ -1275,6 +1319,29 @@ impl BlenderProcRendererConfig {
             stderr_tail_capacity: wire.stderr_tail_capacity,
         })
     }
+}
+
+/// Error returned when programmatic `BlenderProc` options are invalid.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum InvalidBlenderProcRendererConfigError {
+    /// Executable path is empty.
+    #[error("executable_path must not be empty")]
+    EmptyExecutablePath,
+    /// Worker path is empty.
+    #[error("worker_path must not be empty")]
+    EmptyWorkerPath,
+    /// Device selection is blank.
+    #[error("device_selection must not be blank")]
+    BlankDeviceSelection,
+    /// Handshake deadline is invalid.
+    #[error("handshake_timeout_s must be positive and finite")]
+    InvalidHandshakeTimeout,
+    /// Request deadline is invalid.
+    #[error("request_timeout_s must be positive and finite")]
+    InvalidRequestTimeout,
+    /// Stderr diagnostic bound is zero.
+    #[error("stderr_tail_capacity must be nonzero")]
+    ZeroStderrTailCapacity,
 }
 
 /// Typed renderer configuration sections.

@@ -232,6 +232,16 @@ dependencies = [
 [[package]]
 name = "bpp-render-blenderproc"
 version = "0.1.0"
+dependencies = [
+ "blake3",
+ "bpp-assets",
+ "bpp-core",
+ "bpp-dataset",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "bpp-render-wgpu"
