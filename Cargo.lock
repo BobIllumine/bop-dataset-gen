@@ -143,6 +143,10 @@ dependencies = [
 [[package]]
 name = "bpp-dataset"
 version = "0.1.0"
+dependencies = [
+ "bpp-core",
+ "tempfile",
+]
 
 [[package]]
 name = "bpp-physics-rapier"

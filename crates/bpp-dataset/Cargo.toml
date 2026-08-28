@@ -8,3 +8,8 @@ license.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+bpp-core = { path = "../bpp-core" }
+
+[dev-dependencies]
+tempfile = "3"
