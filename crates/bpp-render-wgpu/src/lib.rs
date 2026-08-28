@@ -2,11 +2,21 @@
 
 use std::collections::BTreeMap;
 
+use bpp_assets::{ResolvedAssetCatalog, VisualPrimitive};
 use bpp_core::{
     BackendInfo, BackendKind, InvalidBackendInfoError, RenderChannels, RendererCapabilities,
     WgpuAdapterPreference, WgpuDevicePreference, WgpuRendererConfig,
 };
 use thiserror::Error;
+use wgpu::util::DeviceExt as _;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuVertex {
+    position: [f32; 3],
+    normal: [f32; 3],
+    uv: [f32; 2],
+}
 
 /// Single-owner headless `wgpu` device context.
 pub struct WgpuRenderer {
@@ -15,8 +25,25 @@ pub struct WgpuRenderer {
     capabilities: RendererCapabilities,
     _instance: wgpu::Instance,
     _adapter: wgpu::Adapter,
-    _device: wgpu::Device,
+    device: wgpu::Device,
     _queue: wgpu::Queue,
+    prepared: Option<PreparedGpuCatalog>,
+}
+
+struct PreparedGpuCatalog {
+    fingerprint: String,
+    _assets: BTreeMap<bpp_core::AssetId, GpuAsset>,
+    stats: PreparedAssetStats,
+}
+
+struct GpuAsset {
+    _primitives: Vec<GpuPrimitive>,
+}
+
+struct GpuPrimitive {
+    _vertex_buffer: wgpu::Buffer,
+    _index_buffer: wgpu::Buffer,
+    _index_count: u32,
 }
 
 impl WgpuRenderer {
@@ -73,8 +100,9 @@ impl WgpuRenderer {
             capabilities,
             _instance: instance,
             _adapter: adapter,
-            _device: device,
+            device,
             _queue: queue,
+            prepared: None,
         })
     }
 
@@ -95,6 +123,181 @@ impl WgpuRenderer {
     pub const fn capabilities(&self) -> RendererCapabilities {
         self.capabilities
     }
+
+    /// Uploads checked visual geometry once for the complete resolved catalog.
+    ///
+    /// Preparation is transactional: a failure retains the previously prepared
+    /// catalog, if any, and exposes no partial replacement.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed overflow or device-limit error before creating an
+    /// invalid GPU buffer.
+    pub fn prepare(
+        &mut self,
+        catalog: &ResolvedAssetCatalog,
+    ) -> Result<PreparedAssetStats, WgpuPreparationError> {
+        let maximum_buffer_size = self.device.limits().max_buffer_size;
+        let mut assets = BTreeMap::new();
+        let mut stats = PreparedAssetStats {
+            assets: u64::try_from(catalog.len())
+                .map_err(|_| WgpuPreparationError::CountOverflow)?,
+            primitives: 0,
+            vertices: 0,
+            indices: 0,
+        };
+        for entry in catalog.iter() {
+            let mut primitives = Vec::new();
+            for (primitive_index, primitive) in
+                entry.asset().visual_mesh().primitives().iter().enumerate()
+            {
+                let vertices = pack_vertices(primitive);
+                let vertex_bytes = bytemuck::cast_slice(&vertices);
+                let index_bytes = bytemuck::cast_slice(primitive.indices());
+                validate_buffer_size(
+                    entry.asset_id(),
+                    primitive_index,
+                    GpuBufferKind::Vertex,
+                    vertex_bytes.len(),
+                    maximum_buffer_size,
+                )?;
+                validate_buffer_size(
+                    entry.asset_id(),
+                    primitive_index,
+                    GpuBufferKind::Index,
+                    index_bytes.len(),
+                    maximum_buffer_size,
+                )?;
+                let index_count = u32::try_from(primitive.indices().len())
+                    .map_err(|_| WgpuPreparationError::CountOverflow)?;
+                stats.primitives = stats
+                    .primitives
+                    .checked_add(1)
+                    .ok_or(WgpuPreparationError::CountOverflow)?;
+                stats.vertices = stats
+                    .vertices
+                    .checked_add(
+                        u64::try_from(vertices.len())
+                            .map_err(|_| WgpuPreparationError::CountOverflow)?,
+                    )
+                    .ok_or(WgpuPreparationError::CountOverflow)?;
+                stats.indices = stats
+                    .indices
+                    .checked_add(u64::from(index_count))
+                    .ok_or(WgpuPreparationError::CountOverflow)?;
+                let vertex_buffer =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("bpp asset vertices"),
+                            contents: vertex_bytes,
+                            usage: wgpu::BufferUsages::VERTEX,
+                        });
+                let index_buffer =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("bpp asset indices"),
+                            contents: index_bytes,
+                            usage: wgpu::BufferUsages::INDEX,
+                        });
+                primitives.push(GpuPrimitive {
+                    _vertex_buffer: vertex_buffer,
+                    _index_buffer: index_buffer,
+                    _index_count: index_count,
+                });
+            }
+            assets.insert(
+                entry.asset_id().clone(),
+                GpuAsset {
+                    _primitives: primitives,
+                },
+            );
+        }
+        self.prepared = Some(PreparedGpuCatalog {
+            fingerprint: catalog.fingerprint().to_owned(),
+            _assets: assets,
+            stats,
+        });
+        Ok(stats)
+    }
+
+    /// Returns the prepared catalog identity, if preparation succeeded.
+    #[must_use]
+    pub fn prepared_catalog_fingerprint(&self) -> Option<&str> {
+        self.prepared
+            .as_ref()
+            .map(|prepared| prepared.fingerprint.as_str())
+    }
+
+    /// Returns upload counts for the active prepared catalog.
+    #[must_use]
+    pub fn prepared_asset_stats(&self) -> Option<PreparedAssetStats> {
+        self.prepared.as_ref().map(|prepared| prepared.stats)
+    }
+}
+
+/// Exact geometry counts uploaded for one resolved asset catalog.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreparedAssetStats {
+    assets: u64,
+    primitives: u64,
+    vertices: u64,
+    indices: u64,
+}
+
+impl PreparedAssetStats {
+    /// Returns the number of assets.
+    #[must_use]
+    pub const fn asset_count(self) -> u64 {
+        self.assets
+    }
+    /// Returns the number of source-order visual primitives.
+    #[must_use]
+    pub const fn primitive_count(self) -> u64 {
+        self.primitives
+    }
+    /// Returns the total uploaded vertex count.
+    #[must_use]
+    pub const fn vertex_count(self) -> u64 {
+        self.vertices
+    }
+    /// Returns the total uploaded index count.
+    #[must_use]
+    pub const fn index_count(self) -> u64 {
+        self.indices
+    }
+}
+
+/// GPU buffer role involved in a preparation limit failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GpuBufferKind {
+    /// Interleaved position, normal, and first-UV vertex buffer.
+    Vertex,
+    /// Triangle-list `u32` index buffer.
+    Index,
+}
+
+/// Failure to upload a resolved asset catalog.
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum WgpuPreparationError {
+    /// A collection count exceeded its fixed public/GPU representation.
+    #[error("asset geometry count overflowed its fixed representation")]
+    CountOverflow,
+    /// One source buffer exceeds the selected device limit.
+    #[error(
+        "asset {asset_id:?} primitive {primitive_index} {kind:?} buffer requires {bytes} bytes, exceeding device limit {maximum_bytes}"
+    )]
+    BufferTooLarge {
+        /// Logical asset identity.
+        asset_id: bpp_core::AssetId,
+        /// Stable source primitive index.
+        primitive_index: usize,
+        /// Buffer role.
+        kind: GpuBufferKind,
+        /// Required bytes.
+        bytes: u64,
+        /// Device maximum buffer size.
+        maximum_bytes: u64,
+    },
 }
 
 /// Failure to initialize the headless `wgpu` context.
@@ -155,6 +358,42 @@ fn adapter_rank(
     Some(rank)
 }
 
+fn pack_vertices(primitive: &VisualPrimitive) -> Vec<GpuVertex> {
+    let texture_coordinates = primitive.tex_coord_sets().first();
+    primitive
+        .positions()
+        .iter()
+        .copied()
+        .zip(primitive.normals().iter().copied())
+        .enumerate()
+        .map(|(index, (position, normal))| GpuVertex {
+            position,
+            normal,
+            uv: texture_coordinates.map_or([0.0, 0.0], |set| set[index]),
+        })
+        .collect()
+}
+
+fn validate_buffer_size(
+    asset_id: &bpp_core::AssetId,
+    primitive_index: usize,
+    kind: GpuBufferKind,
+    bytes: usize,
+    maximum_bytes: u64,
+) -> Result<(), WgpuPreparationError> {
+    let bytes = u64::try_from(bytes).map_err(|_| WgpuPreparationError::CountOverflow)?;
+    if bytes > maximum_bytes {
+        return Err(WgpuPreparationError::BufferTooLarge {
+            asset_id: asset_id.clone(),
+            primitive_index,
+            kind,
+            bytes,
+            maximum_bytes,
+        });
+    }
+    Ok(())
+}
+
 fn backend_info(
     adapter: &wgpu::AdapterInfo,
     limits: &wgpu::Limits,
@@ -188,9 +427,16 @@ fn backend_info(
 
 #[cfg(test)]
 mod tests {
+    use bpp_assets::VisualPrimitive;
     use bpp_core::{WgpuAdapterPreference, WgpuDevicePreference};
 
-    use super::adapter_rank;
+    use super::{adapter_rank, pack_vertices};
+
+    fn assert_float_array<const N: usize>(actual: [f32; N], expected: [f32; N]) {
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert_eq!(actual.to_bits(), expected.to_bits());
+        }
+    }
 
     #[test]
     fn explicit_device_class_is_a_hard_filter() {
@@ -249,5 +495,31 @@ mod tests {
 
         assert!(high_discrete < high_integrated);
         assert!(low_integrated < low_discrete);
+    }
+
+    #[test]
+    fn gpu_vertex_packing_uses_first_uv_set_or_zero_without_losing_normals() {
+        let without_uv = VisualPrimitive::try_new(
+            vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
+            vec![[0.0, 0.0, 1.0]; 3],
+            vec![],
+            vec![0, 1, 2],
+            None,
+        )
+        .unwrap();
+        let packed = pack_vertices(&without_uv);
+        assert_float_array(packed[0].position, [1.0, 2.0, 3.0]);
+        assert_float_array(packed[0].normal, [0.0, 0.0, 1.0]);
+        assert_float_array(packed[0].uv, [0.0, 0.0]);
+
+        let with_uv = VisualPrimitive::try_new(
+            without_uv.positions().to_vec(),
+            without_uv.normals().to_vec(),
+            vec![vec![[0.25, 0.75]; 3], vec![[0.5, 0.5]; 3]],
+            without_uv.indices().to_vec(),
+            None,
+        )
+        .unwrap();
+        assert_float_array(pack_vertices(&with_uv)[0].uv, [0.25, 0.75]);
     }
 }
