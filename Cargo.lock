@@ -251,10 +251,12 @@ dependencies = [
  "bpp-assets",
  "bpp-core",
  "bpp-dataset",
+ "bpp-pipeline",
  "bytemuck",
  "glam 0.30.10",
  "pollster",
  "serde_json",
+ "tempfile",
  "thiserror",
  "wgpu",
 ]

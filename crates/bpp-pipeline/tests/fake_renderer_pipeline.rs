@@ -169,6 +169,13 @@ fn fake_renderer_exercises_prepare_render_encode_and_atomic_commit() {
             .join("frames/00002/frame.json")
             .is_file()
     );
+    let checksums: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(completed.scene_path().join("checksums.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(checksums["schema_version"], 1);
+    assert_eq!(checksums["scene_id"], 9);
+    assert_eq!(checksums["files"].as_object().unwrap().len(), 5);
     assert!(
         completed
             .scene_path()

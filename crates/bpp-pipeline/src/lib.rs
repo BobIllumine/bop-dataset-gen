@@ -8,7 +8,10 @@ use std::{
 
 use bpp_assets::ResolvedAssetCatalog;
 use bpp_core::{RenderError, RenderReport, RenderSceneRequest, Renderer};
-use bpp_dataset::{SceneArtifactRequirements, SceneCommitError, SceneStagingArea};
+use bpp_dataset::{
+    DatasetValidationError, SceneArtifactRequirements, SceneCommitError, SceneStagingArea,
+    validate_and_write_checksums,
+};
 use thiserror::Error;
 
 /// Single-owner synchronous renderer orchestration with transactional output.
@@ -77,6 +80,7 @@ where
 
         let report = self.renderer.render_scene(request, &staging)?;
         validate_report(&report, request, &self.renderer.info(), camera_count)?;
+        validate_and_write_checksums(&staging, request)?;
         let requirements = SceneArtifactRequirements::try_new(
             request
                 .cameras()
@@ -169,6 +173,9 @@ pub enum PipelineRenderError {
     /// Staged scene validation or atomic publication failed.
     #[error(transparent)]
     Commit(#[from] SceneCommitError),
+    /// A rendered frame violated the canonical dataset contract.
+    #[error(transparent)]
+    Validation(#[from] DatasetValidationError),
 }
 
 fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), PipelineRenderError> {
