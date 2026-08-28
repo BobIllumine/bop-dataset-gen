@@ -10,6 +10,8 @@ workspace = true
 
 [dependencies]
 bpp-core = { path = "../bpp-core" }
+exr = "=1.74.0"
+png = "=0.18.1"
 
 [dev-dependencies]
 tempfile = "3"
