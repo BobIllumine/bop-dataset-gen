@@ -170,7 +170,11 @@ dependencies = [
 name = "bpp-cli"
 version = "0.1.0"
 dependencies = [
+ "bpp-core",
  "bpp-pipeline",
+ "bpp-render-blenderproc",
+ "bpp-render-wgpu",
+ "serde_json",
 ]
 
 [[package]]
