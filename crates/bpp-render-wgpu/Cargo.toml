@@ -8,3 +8,17 @@ license.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+bpp-core = { path = "../bpp-core" }
+pollster = "=0.4.0"
+thiserror = "2"
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "wgsl"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { version = "=30.0.1", default-features = false, features = ["metal"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wgpu = { version = "=30.0.1", default-features = false, features = ["vulkan", "gles"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wgpu = { version = "=30.0.1", default-features = false, features = ["dx12", "vulkan"] }
