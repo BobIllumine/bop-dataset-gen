@@ -96,6 +96,8 @@ pub enum WorkerReply {
         protocol_version: ProtocolVersion,
         /// Prepared catalog fingerprint.
         catalog_fingerprint: String,
+        /// Controller request identity.
+        request_id: u64,
     },
     /// Confirms raw output for one scene is complete.
     Rendered {
@@ -105,11 +107,15 @@ pub enum WorkerReply {
         scene_id: u64,
         /// Worker-reported render duration.
         render_seconds: f32,
+        /// Controller request identity.
+        request_id: u64,
     },
     /// Confirms all worker-side operations are durable.
     Flushed {
         /// Exact protocol compatibility guard.
         protocol_version: ProtocolVersion,
+        /// Controller request identity.
+        request_id: u64,
     },
     /// Reports a request-level worker failure without crashing the process.
     Error {
@@ -119,6 +125,8 @@ pub enum WorkerReply {
         code: String,
         /// Human-readable diagnostic.
         message: String,
+        /// Controller request identity.
+        request_id: u64,
     },
 }
 
@@ -146,6 +154,8 @@ pub struct BlenderProcRenderer {
     capabilities: RendererCapabilities,
     worker: Worker,
     prepared_fingerprint: Option<String>,
+    prepared_payload: Option<serde_json::Value>,
+    next_request_id: u64,
 }
 
 impl BlenderProcRenderer {
@@ -186,6 +196,8 @@ impl BlenderProcRenderer {
             capabilities: RendererCapabilities::new(channels, None),
             worker,
             prepared_fingerprint: None,
+            prepared_payload: None,
+            next_request_id: 0,
         })
     }
 
@@ -209,21 +221,24 @@ impl Renderer for BlenderProcRenderer {
     }
 
     fn prepare(&mut self, assets: &Self::AssetCatalog) -> Result<(), RenderError> {
+        let request_id = self.allocate_request_id()?;
         let payload = json!({
             "protocol_version": PROTOCOL_VERSION,
             "type": "prepare",
+            "request_id": request_id,
             "catalog_fingerprint": assets.fingerprint(),
             "assets": catalog_wire(assets),
         });
         self.worker
             .send(&payload)
             .map_err(|error| initialization_as_render(&error))?;
-        match self.receive_request()? {
+        match self.receive_request(request_id)? {
             WorkerReply::Prepared {
                 catalog_fingerprint,
                 ..
             } if catalog_fingerprint == assets.fingerprint() => {
                 self.prepared_fingerprint = Some(catalog_fingerprint);
+                self.prepared_payload = Some(payload);
                 Ok(())
             }
             WorkerReply::Error { code, message, .. } => Err(worker_error(&code, &message)),
@@ -249,15 +264,29 @@ impl Renderer for BlenderProcRenderer {
         })?;
         self.capabilities
             .require(request.required_channels(), camera_count)?;
+        let request_id = self.allocate_request_id()?;
+        let payload = json!({
+            "protocol_version": PROTOCOL_VERSION,
+            "type": "render",
+            "request_id": request_id,
+            "request": request,
+            "output_root": staging.root(),
+        });
         self.worker
-            .send(&json!({
-                "protocol_version": PROTOCOL_VERSION,
-                "type": "render",
-                "request": request,
-                "output_root": staging.root(),
-            }))
+            .send(&payload)
             .map_err(|error| initialization_as_render(&error))?;
-        let render_seconds = match self.receive_request()? {
+        let reply = match self.receive_request(request_id) {
+            Ok(reply) => reply,
+            Err(RenderError::WorkerCrashed { .. }) => {
+                self.restart_and_reprepare()?;
+                self.worker
+                    .send(&payload)
+                    .map_err(|error| initialization_as_render(&error))?;
+                self.receive_request(request_id)?
+            }
+            Err(error) => return Err(error),
+        };
+        let render_seconds = match reply {
             WorkerReply::Rendered {
                 scene_id,
                 render_seconds,
@@ -295,10 +324,11 @@ impl Renderer for BlenderProcRenderer {
     }
 
     fn flush(&mut self) -> Result<(), RenderError> {
+        let request_id = self.allocate_request_id()?;
         self.worker
-            .send(&json!({"protocol_version": PROTOCOL_VERSION, "type": "flush"}))
+            .send(&json!({"protocol_version": PROTOCOL_VERSION, "type": "flush", "request_id": request_id}))
             .map_err(|error| initialization_as_render(&error))?;
-        match self.receive_request()? {
+        match self.receive_request(request_id)? {
             WorkerReply::Flushed { .. } => Ok(()),
             WorkerReply::Error { code, message, .. } => Err(worker_error(&code, &message)),
             reply => Err(protocol_error(format!(
@@ -507,10 +537,74 @@ impl Drop for Worker {
 }
 
 impl BlenderProcRenderer {
-    fn receive_request(&mut self) -> Result<WorkerReply, RenderError> {
-        self.worker
+    fn allocate_request_id(&mut self) -> Result<u64, RenderError> {
+        let request_id = self.next_request_id;
+        self.next_request_id =
+            self.next_request_id
+                .checked_add(1)
+                .ok_or_else(|| RenderError::Internal {
+                    message: "BlenderProc request ID overflow".to_owned(),
+                })?;
+        Ok(request_id)
+    }
+
+    fn receive_request(&mut self, expected_request_id: u64) -> Result<WorkerReply, RenderError> {
+        let reply = self
+            .worker
             .receive(Duration::from_secs_f32(self.config.request_timeout_s()))
-            .map_err(|error| initialization_as_render(&error))
+            .map_err(|error| initialization_as_render(&error))?;
+        if reply_request_id(&reply) != Some(expected_request_id) {
+            return Err(protocol_error(format!(
+                "worker reply request ID {:?}; expected {expected_request_id}",
+                reply_request_id(&reply)
+            )));
+        }
+        Ok(reply)
+    }
+
+    fn restart_and_reprepare(&mut self) -> Result<(), RenderError> {
+        let mut worker =
+            Worker::spawn(&self.config).map_err(|error| initialization_as_render(&error))?;
+        worker
+            .send(&WorkerMessage::hello(self.config.device_selection()))
+            .map_err(|error| initialization_as_render(&error))?;
+        match worker
+            .receive(Duration::from_secs_f32(self.config.handshake_timeout_s()))
+            .map_err(|error| initialization_as_render(&error))?
+        {
+            WorkerReply::Ready { .. } => {}
+            reply => {
+                return Err(protocol_error(format!(
+                    "restart expected ready, received {}",
+                    reply_kind(&reply)
+                )));
+            }
+        }
+        let payload = self
+            .prepared_payload
+            .as_ref()
+            .ok_or(RenderError::NotPrepared)?;
+        let request_id = payload
+            .get("request_id")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                protocol_error("stored prepare request omitted request_id".to_owned())
+            })?;
+        worker
+            .send(payload)
+            .map_err(|error| initialization_as_render(&error))?;
+        let reply = worker
+            .receive(Duration::from_secs_f32(self.config.request_timeout_s()))
+            .map_err(|error| initialization_as_render(&error))?;
+        if !matches!(&reply, WorkerReply::Prepared { request_id: actual, .. } if *actual == request_id)
+        {
+            return Err(protocol_error(format!(
+                "restart prepare received {}",
+                reply_kind(&reply)
+            )));
+        }
+        self.worker = worker;
+        Ok(())
     }
 }
 
@@ -601,6 +695,16 @@ fn reply_kind(reply: &WorkerReply) -> &'static str {
         WorkerReply::Rendered { .. } => "rendered",
         WorkerReply::Flushed { .. } => "flushed",
         WorkerReply::Error { .. } => "error",
+    }
+}
+
+fn reply_request_id(reply: &WorkerReply) -> Option<u64> {
+    match reply {
+        WorkerReply::Ready { .. } => None,
+        WorkerReply::Prepared { request_id, .. }
+        | WorkerReply::Rendered { request_id, .. }
+        | WorkerReply::Flushed { request_id, .. }
+        | WorkerReply::Error { request_id, .. } => Some(*request_id),
     }
 }
 

@@ -48,6 +48,9 @@ def make_material(wire: dict, textures: list[dict]) -> bpy.types.Material:
         image.pixels.foreach_set(pixels.ravel())
         node = material.node_tree.nodes.new("ShaderNodeTexImage")
         node.image = image
+        uv = material.node_tree.nodes.new("ShaderNodeUVMap")
+        uv.uv_map = f"TEXCOORD_{binding['tex_coord_set']}"
+        material.node_tree.links.new(uv.outputs["UV"], node.inputs["Vector"])
         material.node_tree.links.new(node.outputs["Color"], principled.inputs["Base Color"])
         material.node_tree.links.new(node.outputs["Alpha"], principled.inputs["Alpha"])
     return material
@@ -65,8 +68,14 @@ def prepare(message: dict) -> None:
             faces = [indices[offset : offset + 3] for offset in range(0, len(indices), 3)]
             mesh.from_pydata(primitive["positions"], [], faces)
             mesh.update()
-            for vertex, normal in zip(mesh.vertices, primitive["normals"], strict=True):
-                vertex.normal = normal
+            mesh.normals_split_custom_set_from_vertices(primitive["normals"])
+            for polygon in mesh.polygons:
+                polygon.use_smooth = True
+            for set_index, coordinates in enumerate(primitive["tex_coord_sets"]):
+                layer = mesh.uv_layers.new(name=f"TEXCOORD_{set_index}")
+                for loop in mesh.loops:
+                    u, v = coordinates[loop.vertex_index]
+                    layer.data[loop.index].uv = (u, 1.0 - v)
             material_index = primitive.get("material")
             if material_index is not None:
                 mesh.materials.append(materials[material_index])
@@ -74,7 +83,7 @@ def prepare(message: dict) -> None:
         prepared[asset["asset_id"]] = {"meshes": meshes}
     ASSETS = prepared
     CATALOG_FINGERPRINT = message["catalog_fingerprint"]
-    reply("prepared", catalog_fingerprint=CATALOG_FINGERPRINT)
+    reply("prepared", request_id=message["request_id"], catalog_fingerprint=CATALOG_FINGERPRINT)
 
 
 def clear_scene_instances() -> None:
@@ -93,7 +102,10 @@ def configure_scene(request: dict) -> None:
             obj["bpp_instance_id"] = instance["instance_id"]
     appearance = request["appearance"]
     world = bpy.context.scene.world
-    world.color = tuple(appearance["ambient_light"]["color"])
+    world.use_nodes = True
+    background = world.node_tree.nodes.get("Background")
+    background.inputs["Color"].default_value = (*appearance["ambient_light"]["color"], 1.0)
+    background.inputs["Strength"].default_value = appearance["ambient_light"]["intensity"]
     for index, light in enumerate(appearance["directional_lights"]):
         data = bpy.data.lights.new(f"directional-{index}", "SUN")
         data.energy = light["illuminance_lux"]
@@ -104,18 +116,23 @@ def configure_scene(request: dict) -> None:
         obj.rotation_euler = direction_to_rotation(direction)
     for index, light in enumerate(appearance["point_lights"]):
         data = bpy.data.lights.new(f"point-{index}", "POINT")
-        data.energy = light["intensity_w"]
+        data.energy = light["luminous_power_lm"]
         data.color = light["color"]
         obj = bpy.data.objects.new(data.name, data)
         bpy.context.collection.objects.link(obj)
         obj.location = light["position_world_m"]
-    for camera in request["cameras"]:
-        width, height = camera["image_size"]["width"], camera["image_size"]["height"]
-        bproc.camera.set_intrinsics_from_K_matrix(np.asarray(camera["k"]).reshape((3, 3)), width, height)
-        camera_from_world = transform_matrix(camera["camera_from_world"]["camera_from_world"])
-        world_from_cv = camera_from_world.inverted()
-        world_from_blender = world_from_cv @ Matrix.Diagonal((1.0, -1.0, -1.0, 1.0))
-        bproc.camera.add_camera_pose(np.asarray(world_from_blender))
+
+
+def configure_camera(camera: dict) -> None:
+    bproc.camera.clear_camera_poses()
+    width, height = camera["image_size"]["width"], camera["image_size"]["height"]
+    bproc.camera.set_intrinsics_from_K_matrix(np.asarray(camera["k"]).reshape((3, 3)), width, height)
+    camera_from_world = transform_matrix(camera["camera_from_world"]["camera_from_world"])
+    world_from_cv = camera_from_world.inverted()
+    world_from_blender = world_from_cv @ Matrix.Diagonal((1.0, -1.0, -1.0, 1.0))
+    bproc.camera.add_camera_pose(np.asarray(world_from_blender))
+    bpy.context.scene.camera.data.clip_start = camera["near_m"]
+    bpy.context.scene.camera.data.clip_end = camera["far_m"]
 
 
 def direction_to_rotation(direction: np.ndarray):
@@ -130,18 +147,19 @@ def render(message: dict) -> None:
     configure_scene(request)
     bproc.renderer.enable_depth_output(activate_antialiasing=False)
     bproc.renderer.enable_segmentation_output(map_by=["cp_bpp_instance_id"])
-    started = time.perf_counter()
-    output = bproc.renderer.render()
-    elapsed = time.perf_counter() - started
     root = Path(message["output_root"])
     instance_key = "cp_bpp_instance_id_segmaps"
-    for index, camera in enumerate(request["cameras"]):
+    started = time.perf_counter()
+    for camera in request["cameras"]:
+        configure_camera(camera)
+        output = bproc.renderer.render()
         directory = root / "frames" / f"{camera['camera_id']:05d}"
         directory.mkdir(parents=True, exist_ok=True)
-        np.asarray(output["colors"][index], dtype=np.uint8)[..., :3].tofile(directory / "rgb.u8")
-        np.asarray(output["depth"][index], dtype="<f4").tofile(directory / "depth.f32le")
-        np.asarray(output[instance_key][index], dtype="<u2").tofile(directory / "instance.u16le")
-    reply("rendered", scene_id=request["scene"]["scene_id"], render_seconds=elapsed)
+        np.asarray(output["colors"][0], dtype=np.uint8)[..., :3].tofile(directory / "rgb.u8")
+        np.asarray(output["depth"][0], dtype="<f4").tofile(directory / "depth.f32le")
+        np.asarray(output[instance_key][0], dtype="<u2").tofile(directory / "instance.u16le")
+    elapsed = time.perf_counter() - started
+    reply("rendered", request_id=message["request_id"], scene_id=request["scene"]["scene_id"], render_seconds=elapsed)
 
 
 def main() -> None:
@@ -158,13 +176,13 @@ def main() -> None:
             elif kind == "render":
                 render(message)
             elif kind == "flush":
-                reply("flushed")
+                reply("flushed", request_id=message["request_id"])
             elif kind == "shutdown":
                 return
             else:
                 raise ValueError(f"unknown message type {kind}")
         except Exception as error:  # Blender failures must cross the protocol boundary.
-            reply("error", code=type(error).__name__, message=str(error))
+            reply("error", request_id=message.get("request_id", 0), code=type(error).__name__, message=str(error))
 
 
 if __name__ == "__main__":

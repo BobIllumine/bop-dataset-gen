@@ -9,10 +9,10 @@ use std::{
 
 use bpp_assets::{ResolvedAssetCatalog, VisualPrimitive};
 use bpp_core::{
-    BackendInfo, BackendKind, CameraSnapshot, InvalidBackendInfoError, NonNegativeFinite,
-    RenderChannels, RenderError, RenderReport, RenderSceneRequest, RenderStageTimings, Renderer,
-    RendererCapabilities, RigidTransform, SceneSnapshot, WgpuAdapterPreference,
-    WgpuDevicePreference, WgpuRendererConfig,
+    AppearanceSnapshot, BackendInfo, BackendKind, CameraSnapshot, InvalidBackendInfoError,
+    NonNegativeFinite, RenderChannels, RenderError, RenderReport, RenderSceneRequest,
+    RenderStageTimings, Renderer, RendererCapabilities, RigidTransform, SceneSnapshot,
+    WgpuAdapterPreference, WgpuDevicePreference, WgpuRendererConfig,
 };
 use bpp_dataset::{DepthFrame, InstanceFrame, RgbFrame, SceneStagingArea};
 use thiserror::Error;
@@ -33,6 +33,13 @@ struct CameraUniform {
     projection: [f32; 4],
     image_and_clip: [f32; 4],
     far_and_padding: [f32; 4],
+    camera_world_position: [f32; 4],
+    ambient: [f32; 4],
+    light_counts: [u32; 4],
+    directional_directions: [[f32; 4]; MAX_LIGHTS],
+    directional_colors: [[f32; 4]; MAX_LIGHTS],
+    point_positions: [[f32; 4]; MAX_LIGHTS],
+    point_colors: [[f32; 4]; MAX_LIGHTS],
 }
 
 #[repr(C)]
@@ -41,9 +48,12 @@ struct DrawUniform {
     world_from_model: [[f32; 4]; 4],
     normal_from_model: [[f32; 4]; 4],
     base_color: [f32; 4],
+    material: [f32; 4],
     instance_id: u32,
     padding: [u32; 3],
 }
+
+const MAX_LIGHTS: usize = 8;
 
 /// Single-owner headless `wgpu` device context.
 pub struct WgpuRenderer {
@@ -75,6 +85,8 @@ struct GpuPrimitive {
     index_buffer: wgpu::Buffer,
     index_count: u32,
     base_color: [f32; 4],
+    metallic: f32,
+    roughness: f32,
 }
 
 struct ReadbackFrame {
@@ -149,7 +161,7 @@ impl WgpuRenderer {
         for format in [
             wgpu::TextureFormat::Rgba8UnormSrgb,
             wgpu::TextureFormat::R32Float,
-            wgpu::TextureFormat::R16Uint,
+            wgpu::TextureFormat::R32Uint,
             wgpu::TextureFormat::Depth32Float,
         ] {
             let features = adapter.get_texture_format_features(format);
@@ -244,11 +256,20 @@ impl WgpuRenderer {
                 )?;
                 let index_count = u32::try_from(primitive.indices().len())
                     .map_err(|_| WgpuPreparationError::CountOverflow)?;
-                let base_color = primitive
+                let material = primitive
                     .material()
                     .and_then(|index| usize::try_from(index.get()).ok())
-                    .and_then(|index| entry.asset().materials().get(index))
-                    .map_or([1.0; 4], bpp_assets::PbrMaterial::base_color_factor);
+                    .and_then(|index| entry.asset().materials().get(index));
+                if material.is_some_and(|material| material.base_color_texture().is_some()) {
+                    return Err(WgpuPreparationError::UnsupportedBaseColorTexture {
+                        asset_id: entry.asset_id().clone(),
+                        primitive_index,
+                    });
+                }
+                let base_color =
+                    material.map_or([1.0; 4], bpp_assets::PbrMaterial::base_color_factor);
+                let metallic = material.map_or(0.0, bpp_assets::PbrMaterial::metallic_factor);
+                let roughness = material.map_or(1.0, bpp_assets::PbrMaterial::roughness_factor);
                 stats.primitives = stats
                     .primitives
                     .checked_add(1)
@@ -283,6 +304,8 @@ impl WgpuRenderer {
                     index_buffer,
                     index_count,
                     base_color,
+                    metallic,
+                    roughness,
                 });
             }
             assets.insert(entry.asset_id().clone(), GpuAsset { primitives });
@@ -342,7 +365,7 @@ impl WgpuRenderer {
         let instance = create_target(
             &self.device,
             extent,
-            wgpu::TextureFormat::R16Uint,
+            wgpu::TextureFormat::R32Uint,
             "instance",
         );
         let rgb_view = rgb.create_view(&wgpu::TextureViewDescriptor::default());
@@ -357,7 +380,7 @@ impl WgpuRenderer {
         let depth_test_view = depth_test.create_view(&wgpu::TextureViewDescriptor::default());
         let rgb_readback = ReadbackBuffer::new(&self.device, width, height, 4, "rgb")?;
         let depth_readback = ReadbackBuffer::new(&self.device, width, height, 4, "depth")?;
-        let instance_readback = ReadbackBuffer::new(&self.device, width, height, 2, "instance")?;
+        let instance_readback = ReadbackBuffer::new(&self.device, width, height, 4, "instance")?;
         let linear = background_srgb.map(srgb_to_linear);
         let bindings = camera
             .zip((!draw_uniforms.is_empty()).then_some(draw_uniforms))
@@ -384,17 +407,27 @@ impl WgpuRenderer {
         depth_readback.copy_from(&mut encoder, &depth, extent);
         instance_readback.copy_from(&mut encoder, &instance, extent);
         let submission = self.queue.submit([encoder.finish()]);
-        let rgba8 = rgb_readback.read(&self.device, Some(submission.clone()))?;
-        let depth_bytes = depth_readback.read(&self.device, Some(submission.clone()))?;
-        let instance_bytes = instance_readback.read(&self.device, Some(submission))?;
+        let rgb_mapping = rgb_readback.begin_read();
+        let depth_mapping = depth_readback.begin_read();
+        let instance_mapping = instance_readback.begin_read();
+        self.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: Some(Duration::from_secs(30)),
+        })?;
+        let rgba8 = rgb_readback.finish_read(&rgb_mapping)?;
+        let depth_bytes = depth_readback.finish_read(&depth_mapping)?;
+        let instance_bytes = instance_readback.finish_read(&instance_mapping)?;
         let depth = depth_bytes
             .chunks_exact(4)
             .map(|bytes| f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
             .collect();
         let instance = instance_bytes
-            .chunks_exact(2)
-            .map(|bytes| u16::from_ne_bytes([bytes[0], bytes[1]]))
-            .collect();
+            .chunks_exact(4)
+            .map(|bytes| u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            .map(|value| {
+                u16::try_from(value).map_err(|_| WgpuReadbackError::InstanceIdOverflow { value })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(ReadbackFrame {
             rgba8,
             depth,
@@ -503,7 +536,7 @@ impl WgpuRenderer {
         &self,
         camera: &CameraSnapshot,
         scene: &SceneSnapshot,
-        background_srgb: [f32; 4],
+        appearance: &AppearanceSnapshot,
     ) -> Result<ReadbackFrame, WgpuSceneError> {
         let prepared = self.prepared.as_ref().ok_or(WgpuSceneError::NotPrepared)?;
         let mut uniforms = Vec::new();
@@ -523,6 +556,7 @@ impl WgpuRenderer {
                     world_from_model: world_from_model.to_cols_array_2d(),
                     normal_from_model: rotation.to_cols_array_2d(),
                     base_color: primitive.base_color,
+                    material: [primitive.metallic, primitive.roughness, 0.0, 0.0],
                     instance_id: u32::from(instance.instance_id().get()),
                     padding: [0; 3],
                 });
@@ -535,37 +569,104 @@ impl WgpuRenderer {
         let size = camera.image_size();
         if uniforms.is_empty() {
             return self
-                .render_clear_targets(size.width(), size.height(), background_srgb)
+                .render_clear_targets(
+                    size.width(),
+                    size.height(),
+                    appearance.background_srgb().rgba(),
+                )
                 .map_err(WgpuSceneError::Readback);
         }
-        let intrinsics = camera.intrinsics();
-        let camera_uniform = CameraUniform {
-            camera_from_world: rigid_matrix(camera.camera_from_world().camera_from_world())
-                .to_cols_array_2d(),
-            projection: [
-                intrinsics.fx(),
-                intrinsics.skew(),
-                intrinsics.cx(),
-                intrinsics.fy(),
-            ],
-            image_and_clip: [
-                intrinsics.cy(),
-                dimension_as_f32(size.width())?,
-                dimension_as_f32(size.height())?,
-                camera.near_m().get(),
-            ],
-            far_and_padding: [camera.far_m().get(), 0.0, 0.0, 0.0],
-        };
+        let camera_from_world = rigid_matrix(camera.camera_from_world().camera_from_world());
+        let camera_uniform = camera_uniform(camera, appearance, camera_from_world)?;
         self.render_targets(
             size.width(),
             size.height(),
-            background_srgb,
+            appearance.background_srgb().rgba(),
             Some(&camera_uniform),
             &uniforms,
             &calls,
         )
         .map_err(WgpuSceneError::Readback)
     }
+}
+
+fn camera_uniform(
+    camera: &CameraSnapshot,
+    appearance: &AppearanceSnapshot,
+    camera_from_world: glam::Mat4,
+) -> Result<CameraUniform, WgpuSceneError> {
+    if appearance.directional_lights().len() > MAX_LIGHTS
+        || appearance.point_lights().len() > MAX_LIGHTS
+    {
+        return Err(WgpuSceneError::TooManyLights {
+            maximum: MAX_LIGHTS,
+        });
+    }
+    let size = camera.image_size();
+    let intrinsics = camera.intrinsics();
+    let mut directional_directions = [[0.0; 4]; MAX_LIGHTS];
+    let mut directional_colors = [[0.0; 4]; MAX_LIGHTS];
+    for (index, light) in appearance.directional_lights().iter().copied().enumerate() {
+        let direction = light.direction_world();
+        directional_directions[index] = [direction[0], direction[1], direction[2], 0.0];
+        let color = light.color().rgb();
+        let scale = light.illuminance_lux().get() / 1000.0;
+        directional_colors[index] = [color[0] * scale, color[1] * scale, color[2] * scale, 0.0];
+    }
+    let mut point_positions = [[0.0; 4]; MAX_LIGHTS];
+    let mut point_colors = [[0.0; 4]; MAX_LIGHTS];
+    for (index, light) in appearance.point_lights().iter().copied().enumerate() {
+        let position = light.position_world_m().map(bpp_core::Meters::get);
+        point_positions[index] = [position[0], position[1], position[2], 0.0];
+        let color = light.color().rgb();
+        let scale = light.luminous_power_lm().get() / (4.0 * std::f32::consts::PI);
+        point_colors[index] = [color[0] * scale, color[1] * scale, color[2] * scale, 0.0];
+    }
+    let ambient = appearance.ambient_light();
+    let ambient_color = ambient.color().rgb();
+    let ambient_scale = ambient.intensity().get();
+    let camera_position = camera_from_world
+        .inverse()
+        .transform_point3(glam::Vec3::ZERO)
+        .to_array();
+    Ok(CameraUniform {
+        camera_from_world: camera_from_world.to_cols_array_2d(),
+        projection: [
+            intrinsics.fx(),
+            intrinsics.skew(),
+            intrinsics.cx(),
+            intrinsics.fy(),
+        ],
+        image_and_clip: [
+            intrinsics.cy(),
+            dimension_as_f32(size.width())?,
+            dimension_as_f32(size.height())?,
+            camera.near_m().get(),
+        ],
+        far_and_padding: [camera.far_m().get(), 0.0, 0.0, 0.0],
+        camera_world_position: [
+            camera_position[0],
+            camera_position[1],
+            camera_position[2],
+            0.0,
+        ],
+        ambient: [
+            ambient_color[0] * ambient_scale,
+            ambient_color[1] * ambient_scale,
+            ambient_color[2] * ambient_scale,
+            0.0,
+        ],
+        light_counts: [
+            u32::try_from(appearance.directional_lights().len()).expect("bounded"),
+            u32::try_from(appearance.point_lights().len()).expect("bounded"),
+            0,
+            0,
+        ],
+        directional_directions,
+        directional_colors,
+        point_positions,
+        point_colors,
+    })
 }
 
 #[derive(Debug, Error)]
@@ -578,6 +679,8 @@ enum WgpuSceneError {
     DrawCountOverflow,
     #[error("image dimension {value} cannot be represented exactly as f32")]
     ImageDimensionPrecision { value: u32 },
+    #[error("appearance exceeds the supported limit of {maximum} directional or point lights")]
+    TooManyLights { maximum: usize },
     #[error(transparent)]
     Readback(#[from] WgpuReadbackError),
 }
@@ -621,11 +724,7 @@ impl Renderer for WgpuRenderer {
         let mut rendered = Vec::with_capacity(request.cameras().len());
         for camera in request.cameras() {
             let frame = self
-                .render_camera(
-                    camera,
-                    request.scene(),
-                    request.appearance().background_srgb().rgba(),
-                )
+                .render_camera(camera, request.scene(), request.appearance())
                 .map_err(map_scene_error)?;
             rendered.push((*camera, frame));
         }
@@ -785,20 +884,20 @@ impl ReadbackBuffer {
         );
     }
 
-    fn read(
-        &self,
-        device: &wgpu::Device,
-        submission: Option<wgpu::SubmissionIndex>,
-    ) -> Result<Vec<u8>, WgpuReadbackError> {
+    fn begin_read(&self) -> mpsc::Receiver<Result<(), wgpu::BufferAsyncError>> {
         let slice = self.buffer.slice(..);
-        let (sender, receiver) = mpsc::sync_channel(1);
+        let (sender, receiver) = mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = sender.send(result);
         });
-        device.poll(wgpu::PollType::Wait {
-            submission_index: submission,
-            timeout: Some(Duration::from_secs(30)),
-        })?;
+        receiver
+    }
+
+    fn finish_read(
+        &self,
+        receiver: &mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+    ) -> Result<Vec<u8>, WgpuReadbackError> {
+        let slice = self.buffer.slice(..);
         receiver
             .recv()
             .map_err(|_| WgpuReadbackError::CallbackDropped)??;
@@ -838,6 +937,8 @@ enum WgpuReadbackError {
     MapRange(#[from] wgpu::MapRangeError),
     #[error("GPU mapping callback was dropped")]
     CallbackDropped,
+    #[error("GPU instance target returned ID {value} outside the canonical u16 domain")]
+    InstanceIdOverflow { value: u32 },
 }
 
 fn create_target(
@@ -886,7 +987,7 @@ fn create_scene_pipeline(
         label: Some("bpp camera layout"),
         entries: &[wgpu::BindGroupLayoutEntry {
             binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
@@ -960,7 +1061,7 @@ fn create_scene_pipeline(
                     write_mask: wgpu::ColorWrites::ALL,
                 }),
                 Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::R16Uint,
+                    format: wgpu::TextureFormat::R32Uint,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 }),
@@ -1062,6 +1163,16 @@ pub enum WgpuPreparationError {
         bytes: u64,
         /// Device maximum buffer size.
         maximum_bytes: u64,
+    },
+    /// The v1 wgpu material path cannot yet sample a base-color texture.
+    #[error(
+        "asset {asset_id:?} primitive {primitive_index} uses an unsupported base-color texture"
+    )]
+    UnsupportedBaseColorTexture {
+        /// Logical asset identity.
+        asset_id: bpp_core::AssetId,
+        /// Stable source primitive index.
+        primitive_index: usize,
     },
 }
 
@@ -1199,12 +1310,15 @@ fn backend_info(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Instant;
 
     use bpp_assets::{
         ConvexPart, NormalizedAsset, ResolvedAsset, ResolvedAssetCatalog, VisualMesh,
         VisualPrimitive,
     };
-    use bpp_core::{AssetId, RenderSceneRequest, WgpuAdapterPreference, WgpuDevicePreference};
+    use bpp_core::{
+        AssetId, RenderSceneRequest, Renderer, WgpuAdapterPreference, WgpuDevicePreference,
+    };
 
     use super::{adapter_rank, pack_vertices};
 
@@ -1370,11 +1484,7 @@ mod tests {
         let mut renderer = super::WgpuRenderer::try_new(config).unwrap();
         renderer.prepare(&visible_triangle_catalog()).unwrap();
         let frame = renderer
-            .render_camera(
-                &request.cameras()[0],
-                request.scene(),
-                request.appearance().background_srgb().rgba(),
-            )
+            .render_camera(&request.cameras()[0], request.scene(), request.appearance())
             .unwrap();
 
         let foreground: Vec<_> = frame
@@ -1388,6 +1498,16 @@ mod tests {
             assert!((frame.depth[index] - 2.0).abs() <= 1.0e-5);
             assert_ne!(&frame.rgba8[index * 4..index * 4 + 3], &[0, 0, 0]);
         }
+        let mut samples = Vec::with_capacity(31);
+        for _ in 0..31 {
+            let started = Instant::now();
+            renderer
+                .render_camera(&request.cameras()[0], request.scene(), request.appearance())
+                .unwrap();
+            samples.push(started.elapsed());
+        }
+        samples.sort_unstable();
+        eprintln!("wgpu triangle render+readback median: {:?}", samples[15]);
     }
 
     #[test]
@@ -1402,11 +1522,26 @@ mod tests {
             false,
         )
         .unwrap();
-        let renderer = super::WgpuRenderer::try_new(config).unwrap();
+        let mut renderer = super::WgpuRenderer::try_new(config).unwrap();
         let root = tempfile::tempdir().unwrap();
-        let mut pipeline = bpp_pipeline::SerialDatasetRenderer::new(renderer, root.path());
-        pipeline.prepare(&visible_triangle_catalog()).unwrap();
-        let completed = pipeline.render_and_commit(&request).unwrap();
-        assert!(completed.scene_path().join("checksums.json").is_file());
+        renderer.prepare(&visible_triangle_catalog()).unwrap();
+        let staging =
+            bpp_dataset::SceneStagingArea::create(root.path(), request.scene().scene_id()).unwrap();
+        std::fs::write(
+            staging.scene_metadata_path(),
+            serde_json::to_vec(request.scene()).unwrap(),
+        )
+        .unwrap();
+        for camera in request.cameras() {
+            staging.prepare_camera(camera.camera_id()).unwrap();
+            std::fs::write(
+                staging.frame_metadata_path(camera.camera_id()),
+                serde_json::to_vec(camera).unwrap(),
+            )
+            .unwrap();
+        }
+        Renderer::render_scene(&mut renderer, &request, &staging).unwrap();
+        bpp_dataset::validate_and_write_checksums(&staging, &request).unwrap();
+        assert!(staging.root().join("checksums.json").is_file());
     }
 }

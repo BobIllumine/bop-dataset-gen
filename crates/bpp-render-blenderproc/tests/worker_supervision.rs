@@ -59,12 +59,12 @@ import json, pathlib, struct, sys
 for line in sys.stdin:
  m=json.loads(line); t=m['type']; v={'protocol_version':1}
  if t=='hello': r={**v,'type':'ready','implementation_version':'fake-1','device_name':'CPU'}
- elif t=='prepare': r={**v,'type':'prepared','catalog_fingerprint':m['catalog_fingerprint']}
+ elif t=='prepare': r={**v,'type':'prepared','request_id':m['request_id'],'catalog_fingerprint':m['catalog_fingerprint']}
  elif t=='render':
   c=m['request']['cameras'][0]; d=pathlib.Path(m['output_root'])/'frames'/f"{c['camera_id']:05d}"; d.mkdir(parents=True,exist_ok=True)
   (d/'rgb.u8').write_bytes(bytes([255,0,0]*4)); (d/'depth.f32le').write_bytes(struct.pack('<4f',2,2,2,2)); (d/'instance.u16le').write_bytes(struct.pack('<4H',1,1,1,1))
-  r={**v,'type':'rendered','scene_id':m['request']['scene']['scene_id'],'render_seconds':0.01}
- elif t=='flush': r={**v,'type':'flushed'}
+  r={**v,'type':'rendered','request_id':m['request_id'],'scene_id':m['request']['scene']['scene_id'],'render_seconds':0.01}
+ elif t=='flush': r={**v,'type':'flushed','request_id':m['request_id']}
  elif t=='shutdown': break
  print(json.dumps(r),flush=True)
 "#).unwrap();
@@ -102,5 +102,42 @@ for line in sys.stdin:
                 .exists()
         );
         renderer.flush().unwrap();
+    }
+
+    #[test]
+    fn unexpected_render_crash_is_restarted_exactly_once_and_reprepared() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("crash-once-worker.py");
+        fs::write(&executable, r#"#!/usr/bin/env python3
+import json, pathlib, struct, sys
+marker=pathlib.Path(__file__).with_suffix('.crashed')
+for line in sys.stdin:
+ m=json.loads(line); t=m['type']; v={'protocol_version':1}
+ if t=='hello': r={**v,'type':'ready','implementation_version':'fake-1','device_name':'CPU'}
+ elif t=='prepare': r={**v,'type':'prepared','request_id':m['request_id'],'catalog_fingerprint':m['catalog_fingerprint']}
+ elif t=='render':
+  if not marker.exists(): marker.write_text('once'); sys.exit(9)
+  c=m['request']['cameras'][0]; d=pathlib.Path(m['output_root'])/'frames'/f"{c['camera_id']:05d}"; d.mkdir(parents=True,exist_ok=True)
+  (d/'rgb.u8').write_bytes(bytes([255,0,0]*4)); (d/'depth.f32le').write_bytes(struct.pack('<4f',2,2,2,2)); (d/'instance.u16le').write_bytes(struct.pack('<4H',1,1,1,1))
+  r={**v,'type':'rendered','request_id':m['request_id'],'scene_id':m['request']['scene']['scene_id'],'render_seconds':0.01}
+ elif t=='shutdown': break
+ else: r={**v,'type':'flushed','request_id':m['request_id']}
+ print(json.dumps(r),flush=True)
+"#).unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+        let config =
+            BlenderProcRendererConfig::try_new(&executable, "unused.py", "CPU", 2.0, 2.0, 4096)
+                .unwrap();
+        let mut renderer = BlenderProcRenderer::try_new(config).unwrap();
+        renderer.prepare(&catalog()).unwrap();
+        let request: RenderSceneRequest = serde_json::from_str(REQUEST).unwrap();
+        let staging = SceneStagingArea::create(temp.path(), request.scene().scene_id()).unwrap();
+        staging
+            .prepare_camera(request.cameras()[0].camera_id())
+            .unwrap();
+        assert!(renderer.render_scene(&request, &staging).is_ok());
+        assert!(executable.with_extension("crashed").is_file());
     }
 }

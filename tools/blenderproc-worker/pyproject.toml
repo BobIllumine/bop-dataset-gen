@@ -1,0 +1,11 @@
+[project]
+name = "bpp-blenderproc-worker"
+version = "0.1.0"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "blenderproc==2.7.0",
+    "numpy>=1.24,<3",
+]
+
+[tool.uv]
+package = false

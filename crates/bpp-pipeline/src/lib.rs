@@ -1,5 +1,9 @@
 //! Bounded orchestration for physics, rendering, and dataset commits.
 
+mod benchmark;
+
+pub use benchmark::{InvalidRenderBenchmarkSummary, RenderBenchmarkSummary};
+
 use std::{
     fs::File,
     io::{self, Write},
