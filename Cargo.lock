@@ -240,8 +240,11 @@ dependencies = [
  "blake3",
  "bpp-assets",
  "bpp-core",
+ "bpp-dataset",
  "bytemuck",
+ "glam 0.30.10",
  "pollster",
+ "serde_json",
  "thiserror",
  "wgpu",
 ]
