@@ -1322,6 +1322,24 @@ mod tests {
 
     use super::{adapter_rank, pack_vertices};
 
+    fn project_opencv_point_to_clip(
+        point: [f32; 3],
+        intrinsics: [f32; 5],
+        image_size: [f32; 2],
+        clip_planes: [f32; 2],
+    ) -> [f32; 4] {
+        let [x, y, z] = point;
+        let [fx, skew, cx, fy, cy] = intrinsics;
+        let [width, height] = image_size;
+        let [near, far] = clip_planes;
+        [
+            2.0 * (fx * x + skew * y) / width + (2.0 * cx / width - 1.0) * z,
+            -2.0 * fy * y / height + (1.0 - 2.0 * cy / height) * z,
+            far / (far - near) * z - far * near / (far - near),
+            z,
+        ]
+    }
+
     fn assert_float_array<const N: usize>(actual: [f32; N], expected: [f32; N]) {
         for (actual, expected) in actual.into_iter().zip(expected) {
             assert_eq!(actual.to_bits(), expected.to_bits());
@@ -1421,6 +1439,48 @@ mod tests {
 
         assert!(high_discrete < high_integrated);
         assert!(low_integrated < low_discrete);
+    }
+
+    #[test]
+    fn opencv_camera_center_projects_to_the_wgpu_viewport_center() {
+        let clip = project_opencv_point_to_clip(
+            [0.0, 0.0, 2.0],
+            [400.0, 0.0, 320.0, 400.0, 240.0],
+            [640.0, 480.0],
+            [0.1, 10.0],
+        );
+
+        assert_eq!(clip[0].to_bits(), 0.0_f32.to_bits());
+        assert_eq!(clip[1].to_bits(), 0.0_f32.to_bits());
+        assert!((clip[2] / clip[3] - 0.959_596).abs() <= f32::EPSILON);
+        assert_eq!(clip[3].to_bits(), 2.0_f32.to_bits());
+    }
+
+    #[test]
+    fn opencv_down_axis_maps_to_negative_wgpu_ndc_y_and_skew_affects_x() {
+        let clip = project_opencv_point_to_clip(
+            [0.25, 0.5, 2.0],
+            [400.0, 20.0, 320.0, 400.0, 240.0],
+            [640.0, 480.0],
+            [0.1, 10.0],
+        );
+        let ndc = [clip[0] / clip[3], clip[1] / clip[3]];
+
+        assert!((ndc[0] - 0.171_875).abs() <= f32::EPSILON);
+        assert!((ndc[1] - (-0.416_666_7)).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn camera_near_and_far_planes_map_to_wgpu_zero_and_one_depth() {
+        for (z, expected) in [(0.1, 0.0), (10.0, 1.0)] {
+            let clip = project_opencv_point_to_clip(
+                [0.0, 0.0, z],
+                [400.0, 0.0, 320.0, 400.0, 240.0],
+                [640.0, 480.0],
+                [0.1, 10.0],
+            );
+            assert!((clip[2] / clip[3] - expected).abs() <= 2.0 * f32::EPSILON);
+        }
     }
 
     #[test]
