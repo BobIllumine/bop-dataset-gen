@@ -10,6 +10,8 @@ struct Camera {
     directional_colors: array<vec4<f32>, 8>,
     point_positions: array<vec4<f32>, 8>,
     point_colors: array<vec4<f32>, 8>,
+    light_clip_from_world: mat4x4<f32>,
+    shadow: vec4<f32>,
 };
 
 struct DrawData {
@@ -25,6 +27,23 @@ struct DrawData {
 
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var<storage, read> draws: array<DrawData>;
+@group(2) @binding(0) var shadow_map: texture_depth_2d;
+@group(2) @binding(1) var shadow_sampler: sampler_comparison;
+
+fn directional_shadow(world_position: vec3<f32>, normal: vec3<f32>) -> f32 {
+    if camera.shadow.x < 0.5 {
+        return 1.0;
+    }
+    let clip = camera.light_clip_from_world * vec4<f32>(world_position, 1.0);
+    let ndc = clip.xyz / clip.w;
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || ndc.z < 0.0 || ndc.z > 1.0 {
+        return 1.0;
+    }
+    let light_direction = normalize(-camera.directional_directions[0].xyz);
+    let bias = camera.shadow.y * (1.0 - max(dot(normal, light_direction), 0.0));
+    return textureSampleCompare(shadow_map, shadow_sampler, uv, ndc.z - bias);
+}
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -96,8 +115,9 @@ fn fs_main(input: VertexOutput) -> FragmentOutput {
         let half_direction = normalize(light_direction + view_direction);
         let shininess = max(2.0, 2.0 / (roughness * roughness) - 2.0);
         let highlight = pow(max(dot(normal, half_direction), 0.0), shininess);
-        illumination += radiance * diffuse;
-        specular += radiance * highlight;
+        let visibility = select(1.0, directional_shadow(input.world_position, normal), index == 0u);
+        illumination += radiance * diffuse * visibility;
+        specular += radiance * highlight * visibility;
     }
     for (var index = 0u; index < camera.light_counts.y; index++) {
         let offset = camera.point_positions[index].xyz - input.world_position;

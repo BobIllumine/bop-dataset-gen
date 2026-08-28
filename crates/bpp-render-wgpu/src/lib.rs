@@ -40,6 +40,8 @@ struct CameraUniform {
     directional_colors: [[f32; 4]; MAX_LIGHTS],
     point_positions: [[f32; 4]; MAX_LIGHTS],
     point_colors: [[f32; 4]; MAX_LIGHTS],
+    light_clip_from_world: [[f32; 4]; 4],
+    shadow: [f32; 4],
 }
 
 #[repr(C)]
@@ -54,6 +56,8 @@ struct DrawUniform {
 }
 
 const MAX_LIGHTS: usize = 8;
+const GPU_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 3] =
+    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
 
 /// Single-owner headless `wgpu` device context.
 pub struct WgpuRenderer {
@@ -65,8 +69,10 @@ pub struct WgpuRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     render_pipeline: wgpu::RenderPipeline,
+    shadow_pipeline: wgpu::RenderPipeline,
     camera_layout: wgpu::BindGroupLayout,
     draws_layout: wgpu::BindGroupLayout,
+    shadow_layout: wgpu::BindGroupLayout,
     prepared: Option<PreparedGpuCatalog>,
 }
 
@@ -87,6 +93,8 @@ struct GpuPrimitive {
     base_color: [f32; 4],
     metallic: f32,
     roughness: f32,
+    bounds_min: [f32; 3],
+    bounds_max: [f32; 3],
 }
 
 struct ReadbackFrame {
@@ -124,6 +132,12 @@ struct SceneBindings {
     _draws_buffer: wgpu::Buffer,
     camera: wgpu::BindGroup,
     draws: wgpu::BindGroup,
+}
+
+struct ShadowResources {
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    bind_group: wgpu::BindGroup,
 }
 
 impl WgpuRenderer {
@@ -184,7 +198,15 @@ impl WgpuRenderer {
                 return Err(WgpuInitializationError::UnsupportedRenderFormat { format });
             }
         }
-        let (render_pipeline, camera_layout, draws_layout) = create_scene_pipeline(&device);
+        let maximum_shadow_map_size = adapter.limits().max_texture_dimension_2d;
+        if config.shadow_map_size() > maximum_shadow_map_size {
+            return Err(WgpuInitializationError::ShadowMapTooLarge {
+                requested: config.shadow_map_size(),
+                maximum: maximum_shadow_map_size,
+            });
+        }
+        let (render_pipeline, shadow_pipeline, camera_layout, draws_layout, shadow_layout) =
+            create_scene_pipeline(&device);
         let info = backend_info(&adapter_info, &adapter.limits())?;
         let channels = RenderChannels::try_new(true, true, true)
             .map_err(|_| WgpuInitializationError::InternalInvariant)?;
@@ -198,8 +220,10 @@ impl WgpuRenderer {
             device,
             queue,
             render_pipeline,
+            shadow_pipeline,
             camera_layout,
             draws_layout,
+            shadow_layout,
             prepared: None,
         })
     }
@@ -311,6 +335,7 @@ impl WgpuRenderer {
                             contents: index_bytes,
                             usage: wgpu::BufferUsages::INDEX,
                         });
+                let (bounds_min, bounds_max) = primitive_bounds(primitive);
                 primitives.push(GpuPrimitive {
                     vertex_buffer,
                     index_buffer,
@@ -318,6 +343,8 @@ impl WgpuRenderer {
                     base_color,
                     metallic,
                     roughness,
+                    bounds_min,
+                    bounds_max,
                 });
             }
             assets.insert(entry.asset_id().clone(), GpuAsset { primitives });
@@ -419,6 +446,7 @@ impl WgpuRenderer {
         let bindings = camera
             .zip((!draw_uniforms.is_empty()).then_some(draw_uniforms))
             .map(|(camera, draws)| self.create_scene_bindings(camera, draws));
+        let shadow = bindings.as_ref().map(|_| self.create_shadow_resources());
 
         let mut encoder = self
             .device
@@ -436,6 +464,7 @@ impl WgpuRenderer {
             linear,
             bindings.as_ref(),
             draw_calls,
+            shadow.as_ref(),
         );
         rgb_readback.copy_from(&mut encoder, &rgb, extent);
         depth_readback.copy_from(&mut encoder, &depth, extent);
@@ -505,7 +534,29 @@ impl WgpuRenderer {
         clear: [f32; 4],
         bindings: Option<&SceneBindings>,
         draw_calls: &[DrawCall<'_>],
+        shadow: Option<&ShadowResources>,
     ) {
+        if let (Some(bindings), Some(shadow)) = (bindings, shadow) {
+            let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("bpp directional shadow pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &shadow.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            shadow_pass.set_pipeline(&self.shadow_pipeline);
+            shadow_pass.set_bind_group(0, &bindings.camera, &[]);
+            shadow_pass.set_bind_group(1, &bindings.draws, &[]);
+            encode_draw_calls(&mut shadow_pass, draw_calls);
+        }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("bpp scene pass"),
             color_attachments: &[
@@ -537,18 +588,62 @@ impl WgpuRenderer {
             pass.set_pipeline(&self.render_pipeline);
             pass.set_bind_group(0, &bindings.camera, &[]);
             pass.set_bind_group(1, &bindings.draws, &[]);
-            for call in draw_calls {
-                pass.set_vertex_buffer(0, call.primitive.vertex_buffer.slice(..));
-                pass.set_index_buffer(
-                    call.primitive.index_buffer.slice(..),
-                    wgpu::IndexFormat::Uint32,
-                );
-                pass.draw_indexed(
-                    0..call.primitive.index_count,
-                    0,
-                    call.draw_index..call.draw_index + 1,
-                );
-            }
+            pass.set_bind_group(
+                2,
+                &shadow
+                    .expect("bindings require shadow resources")
+                    .bind_group,
+                &[],
+            );
+            encode_draw_calls(&mut pass, draw_calls);
+        }
+    }
+
+    fn create_shadow_resources(&self) -> ShadowResources {
+        let size = self.config.shadow_map_size();
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("bpp directional shadow map"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("bpp shadow comparison sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bpp shadow bind group"),
+            layout: &self.shadow_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+        ShadowResources {
+            _texture: texture,
+            view,
+            bind_group,
         }
     }
 
@@ -600,7 +695,15 @@ impl WgpuRenderer {
                 .map_err(WgpuSceneError::Readback);
         }
         let camera_from_world = rigid_matrix(camera.camera_from_world().camera_from_world());
-        let camera_uniform = camera_uniform(camera, appearance, camera_from_world)?;
+        let (light_clip_from_world, shadow_enabled) =
+            shadow_projection(appearance, &uniforms, &calls);
+        let camera_uniform = camera_uniform(
+            camera,
+            appearance,
+            camera_from_world,
+            light_clip_from_world,
+            shadow_enabled,
+        )?;
         self.begin_render_targets(
             size.width(),
             size.height(),
@@ -657,6 +760,8 @@ fn camera_uniform(
     camera: &CameraSnapshot,
     appearance: &AppearanceSnapshot,
     camera_from_world: glam::Mat4,
+    light_clip_from_world: glam::Mat4,
+    shadow_enabled: bool,
 ) -> Result<CameraUniform, WgpuSceneError> {
     if appearance.directional_lights().len() > MAX_LIGHTS
         || appearance.point_lights().len() > MAX_LIGHTS
@@ -729,7 +834,68 @@ fn camera_uniform(
         directional_colors,
         point_positions,
         point_colors,
+        light_clip_from_world: light_clip_from_world.to_cols_array_2d(),
+        shadow: [f32::from(shadow_enabled), 0.001_5, 0.0, 0.0],
     })
+}
+
+fn primitive_bounds(primitive: &VisualPrimitive) -> ([f32; 3], [f32; 3]) {
+    let mut minimum = glam::Vec3::splat(f32::INFINITY);
+    let mut maximum = glam::Vec3::splat(f32::NEG_INFINITY);
+    for position in primitive.positions() {
+        let point = glam::Vec3::from_array(*position);
+        minimum = minimum.min(point);
+        maximum = maximum.max(point);
+    }
+    (minimum.to_array(), maximum.to_array())
+}
+
+fn shadow_projection(
+    appearance: &AppearanceSnapshot,
+    uniforms: &[DrawUniform],
+    calls: &[DrawCall<'_>],
+) -> (glam::Mat4, bool) {
+    let Some(light) = appearance.directional_lights().first() else {
+        return (glam::Mat4::IDENTITY, false);
+    };
+    let mut minimum = glam::Vec3::splat(f32::INFINITY);
+    let mut maximum = glam::Vec3::splat(f32::NEG_INFINITY);
+    for (uniform, call) in uniforms.iter().zip(calls) {
+        let world_from_model = glam::Mat4::from_cols_array_2d(&uniform.world_from_model);
+        for x in [call.primitive.bounds_min[0], call.primitive.bounds_max[0]] {
+            for y in [call.primitive.bounds_min[1], call.primitive.bounds_max[1]] {
+                for z in [call.primitive.bounds_min[2], call.primitive.bounds_max[2]] {
+                    let point = world_from_model.transform_point3(glam::vec3(x, y, z));
+                    minimum = minimum.min(point);
+                    maximum = maximum.max(point);
+                }
+            }
+        }
+    }
+    if !minimum.is_finite() || !maximum.is_finite() {
+        return (glam::Mat4::IDENTITY, false);
+    }
+    let direction = glam::Vec3::from_array(light.direction_world()).normalize();
+    (directional_shadow_matrix(direction, minimum, maximum), true)
+}
+
+fn directional_shadow_matrix(
+    direction: glam::Vec3,
+    minimum: glam::Vec3,
+    maximum: glam::Vec3,
+) -> glam::Mat4 {
+    let center = (minimum + maximum) * 0.5;
+    let radius = ((maximum - minimum).length() * 0.5).max(0.01);
+    let up = if direction.z.abs() > 0.95 {
+        glam::Vec3::X
+    } else {
+        glam::Vec3::Z
+    };
+    let eye = center - direction * (radius * 2.0 + 0.1);
+    let view = glam::Mat4::look_at_rh(eye, center, up);
+    let projection =
+        glam::Mat4::orthographic_rh(-radius, radius, -radius, radius, 0.01, radius * 4.0 + 0.2);
+    projection * view
 }
 
 #[derive(Debug, Error)]
@@ -1052,15 +1218,33 @@ fn color_attachment(
     }
 }
 
+fn encode_draw_calls<'pass>(
+    pass: &mut wgpu::RenderPass<'pass>,
+    draw_calls: &'pass [DrawCall<'pass>],
+) {
+    for call in draw_calls {
+        pass.set_vertex_buffer(0, call.primitive.vertex_buffer.slice(..));
+        pass.set_index_buffer(
+            call.primitive.index_buffer.slice(..),
+            wgpu::IndexFormat::Uint32,
+        );
+        pass.draw_indexed(
+            0..call.primitive.index_count,
+            0,
+            call.draw_index..call.draw_index + 1,
+        );
+    }
+}
+
 fn create_scene_pipeline(
     device: &wgpu::Device,
 ) -> (
     wgpu::RenderPipeline,
+    wgpu::RenderPipeline,
+    wgpu::BindGroupLayout,
     wgpu::BindGroupLayout,
     wgpu::BindGroupLayout,
 ) {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 3] =
-        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
     let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("bpp camera layout"),
         entries: &[wgpu::BindGroupLayoutEntry {
@@ -1087,9 +1271,14 @@ fn create_scene_pipeline(
             count: None,
         }],
     });
+    let shadow_layout = create_shadow_bind_group_layout(device);
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("bpp scene pipeline layout"),
-        bind_group_layouts: &[Some(&camera_layout), Some(&draws_layout)],
+        bind_group_layouts: &[
+            Some(&camera_layout),
+            Some(&draws_layout),
+            Some(&shadow_layout),
+        ],
         immediate_size: 0,
     });
     let shader = device.create_shader_module(wgpu::include_wgsl!("scene.wgsl"));
@@ -1103,7 +1292,7 @@ fn create_scene_pipeline(
             buffers: &[Some(wgpu::VertexBufferLayout {
                 array_stride: 32,
                 step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &ATTRIBUTES,
+                attributes: &GPU_VERTEX_ATTRIBUTES,
             })],
         },
         primitive: wgpu::PrimitiveState {
@@ -1148,7 +1337,84 @@ fn create_scene_pipeline(
         multiview_mask: None,
         cache: None,
     });
-    (pipeline, camera_layout, draws_layout)
+    let shadow_pipeline = create_shadow_pipeline(device, &camera_layout, &draws_layout);
+    (
+        pipeline,
+        shadow_pipeline,
+        camera_layout,
+        draws_layout,
+        shadow_layout,
+    )
+}
+
+fn create_shadow_pipeline(
+    device: &wgpu::Device,
+    camera_layout: &wgpu::BindGroupLayout,
+    draws_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("bpp shadow pipeline layout"),
+        bind_group_layouts: &[Some(camera_layout), Some(draws_layout)],
+        immediate_size: 0,
+    });
+    let shader = device.create_shader_module(wgpu::include_wgsl!("shadow.wgsl"));
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("bpp directional shadow pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: 32,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &GPU_VERTEX_ATTRIBUTES,
+            })],
+        },
+        primitive: wgpu::PrimitiveState {
+            cull_mode: Some(wgpu::Face::Front),
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::LessEqual),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState {
+                constant: 2,
+                slope_scale: 2.0,
+                clamp: 0.0,
+            },
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        fragment: None,
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn create_shadow_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("bpp shadow texture layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                count: None,
+            },
+        ],
+    })
 }
 
 fn srgb_to_linear(value: f32) -> f32 {
@@ -1282,6 +1548,14 @@ pub enum WgpuInitializationError {
         /// Unsupported canonical format.
         format: wgpu::TextureFormat,
     },
+    /// Configured shadow-map dimensions exceed the selected adapter limit.
+    #[error("shadow map size {requested} exceeds adapter limit {maximum}")]
+    ShadowMapTooLarge {
+        /// Requested square shadow-map edge length.
+        requested: u32,
+        /// Maximum supported 2D texture edge length.
+        maximum: u32,
+    },
 }
 
 fn adapter_rank(
@@ -1398,7 +1672,7 @@ mod tests {
         AssetId, RenderSceneRequest, Renderer, WgpuAdapterPreference, WgpuDevicePreference,
     };
 
-    use super::{adapter_rank, pack_vertices};
+    use super::{adapter_rank, directional_shadow_matrix, pack_vertices};
 
     fn project_opencv_point_to_clip(
         point: [f32; 3],
@@ -1562,6 +1836,26 @@ mod tests {
     }
 
     #[test]
+    fn directional_shadow_volume_contains_scene_bounds_for_vertical_and_oblique_lights() {
+        let minimum = glam::vec3(-2.0, -1.0, 0.25);
+        let maximum = glam::vec3(3.0, 4.0, 2.5);
+        for direction in [glam::Vec3::Z, glam::vec3(1.0, -2.0, 3.0).normalize()] {
+            let matrix = directional_shadow_matrix(direction, minimum, maximum);
+            for x in [minimum.x, maximum.x] {
+                for y in [minimum.y, maximum.y] {
+                    for z in [minimum.z, maximum.z] {
+                        let clip = matrix * glam::vec4(x, y, z, 1.0);
+                        let ndc = clip.truncate() / clip.w;
+                        assert!(ndc.x.abs() <= 1.0 + 4.0 * f32::EPSILON);
+                        assert!(ndc.y.abs() <= 1.0 + 4.0 * f32::EPSILON);
+                        assert!((0.0..=1.0 + 4.0 * f32::EPSILON).contains(&ndc.z));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn gpu_vertex_packing_uses_first_uv_set_or_zero_without_losing_normals() {
         let without_uv = VisualPrimitive::try_new(
             vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
@@ -1611,7 +1905,15 @@ mod tests {
     #[ignore = "manual hardware-dependent triangle render/readback test"]
     fn triangle_render_produces_aligned_rgb_metric_depth_and_instance_pixels() {
         const REQUEST: &str = r#"{"schema_version":1,"scene":{"schema_version":1,"scene_id":1,"accepted_attempt":0,"seed_fingerprint":"seed","bin":{"schema_version":1,"inner_dimensions_m":[1.0,1.0,1.0],"floor_thickness_m":0.1,"wall_thickness_m":0.1,"world_from_bin":{"translation":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]},"material_label":"steel"},"instances":[{"schema_version":1,"instance_id":1,"asset_id":"triangle","world_from_model":{"translation":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]},"physical_properties":{"schema_version":1,"mass_kg":1.0,"friction":0.5,"restitution":0.0}}],"physics":{"schema_version":1,"attempts":1,"steps":1,"simulated_seconds":0.01,"final_max_linear_speed_mps":0.0,"final_max_angular_speed_rad_s":0.0,"final_max_penetration_m":0.0,"rejection_counts":[]}},"cameras":[{"schema_version":1,"camera_id":0,"image_size":{"width":32,"height":32},"k":[25.0,0.0,16.0,0.0,25.0,16.0,0.0,0.0,1.0],"camera_from_world":{"camera_from_world":{"translation":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]}},"near_m":0.1,"far_m":10.0}],"appearance":{"schema_version":1,"background_srgb":[0.0,0.0,0.0,1.0],"ambient_light":{"schema_version":1,"color":[1.0,1.0,1.0],"intensity":1.0},"directional_lights":[],"point_lights":[]},"required_channels":{"schema_version":1,"rgb":true,"depth":true,"instance":true}}"#;
-        let request: RenderSceneRequest = serde_json::from_str(REQUEST).unwrap();
+        let mut request_json: serde_json::Value = serde_json::from_str(REQUEST).unwrap();
+        request_json["appearance"]["ambient_light"]["intensity"] = serde_json::Value::from(0.1);
+        request_json["appearance"]["directional_lights"] = serde_json::json!([{
+            "schema_version": 1,
+            "direction_world": [0.0, 0.0, 1.0],
+            "color": [1.0, 1.0, 1.0],
+            "illuminance_lux": 1000.0
+        }]);
+        let request: RenderSceneRequest = serde_json::from_value(request_json).unwrap();
         let config = bpp_core::WgpuRendererConfig::try_new(
             WgpuDevicePreference::Automatic,
             WgpuAdapterPreference::HighPerformance,

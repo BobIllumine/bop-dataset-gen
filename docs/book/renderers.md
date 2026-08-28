@@ -33,11 +33,13 @@ memory while overlapping rendering and mapping across cameras. Row padding is
 removed on the CPU before encoding.
 
 The shader supports base-color factors, metallic/roughness response, ambient
-light, and up to eight directional plus eight inverse-square point lights.
-Base-color textures are rejected during preparation instead of being silently
-ignored. Shadow maps and cross-GPU pixel identity are not claimed by this
-version. RGB is intended for fast deterministic rasterized training imagery;
-depth, labels, geometry, and metadata are the strict contracts.
+light, and up to eight directional plus eight inverse-square point lights. The
+first directional light owns one configurable orthographic shadow map whose
+volume is derived from transformed scene bounds; additional lights remain
+unshadowed. Base-color textures are rejected during preparation instead of
+being silently ignored. Cross-GPU pixel identity is not claimed. RGB is
+intended for fast deterministic rasterized training imagery; depth, labels,
+geometry, and metadata are the strict contracts.
 
 Hardware acceptance on Apple Metal:
 
@@ -47,11 +49,11 @@ cargo test -p bpp-render-wgpu --release --locked --lib \
   -- --ignored --nocapture
 ```
 
-On the development M4 Pro, the 32x32 analytic-triangle render plus three-channel
-readback median was 548.875 microseconds over 31 measured iterations on
-2026-08-28. This is a smoke-scale baseline, not a cross-backend performance
-claim. The transactional hardware test also passed canonical decode, label,
-depth, checksum, and atomic-publication validation.
+On the development M4 Pro, the 32x32 lit analytic-triangle render, shadow pass,
+and three-channel readback median was 343.083 microseconds over 31 measured
+iterations on 2026-08-28. This is a smoke-scale baseline, not a cross-backend
+performance claim. The three-camera transactional hardware test also passed
+canonical decode, label, depth, checksum, and atomic-publication validation.
 
 ## BlenderProc backend
 
