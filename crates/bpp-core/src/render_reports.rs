@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, num::NonZeroU32};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use thiserror::Error;
 
-use crate::{NonNegativeFinite, RenderChannels, SceneId, SchemaVersion};
+use crate::{NonNegativeFinite, RenderChannels, RenderError, SceneId, SchemaVersion};
 
 /// Renderer implementation family used for capability and provenance records.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -225,6 +225,28 @@ impl RendererCapabilities {
         match self.max_cameras_per_scene {
             Some(limit) => camera_count <= limit.get(),
             None => true,
+        }
+    }
+
+    /// Requires support for the requested channels and camera count.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RenderError::UnsupportedCapabilities`] with the complete
+    /// requested and supported values when preflight fails.
+    pub const fn require(
+        self,
+        required_channels: RenderChannels,
+        camera_count: u32,
+    ) -> Result<(), RenderError> {
+        if self.supports(required_channels, camera_count) {
+            Ok(())
+        } else {
+            Err(RenderError::UnsupportedCapabilities {
+                required_channels,
+                camera_count,
+                supported: self,
+            })
         }
     }
 }

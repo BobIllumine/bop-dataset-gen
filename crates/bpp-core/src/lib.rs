@@ -7,6 +7,7 @@ mod distributions;
 mod identifiers;
 mod render_reports;
 mod render_requests;
+mod renderer;
 mod run_config;
 mod run_config_wire;
 mod scenes;
@@ -39,6 +40,7 @@ pub use render_reports::{
 pub use render_requests::{
     InvalidRenderChannelsError, InvalidRenderSceneRequestError, RenderChannels, RenderSceneRequest,
 };
+pub use renderer::{RenderError, Renderer};
 pub use run_config::{
     AppearanceConfig, AppearanceField, AssetConfig, Axis, BinConfig, BlenderProcRendererConfig,
     CameraConfig, CameraPose, CameraProjection, CameraShellField, ConfigCountField,
