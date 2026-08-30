@@ -94,6 +94,27 @@ fn incompatible_resume_is_rejected_before_scene_scanning() {
 }
 
 #[test]
+fn resolved_config_is_atomically_persisted_and_must_match_manifest_bytes() {
+    let root = tempfile::tempdir().unwrap();
+    let index = DatasetResumeIndex::open_or_create(root.path(), manifest(b"config-v1")).unwrap();
+
+    index
+        .persist_resolved_config(root.path(), b"config-v1")
+        .unwrap();
+    index
+        .persist_resolved_config(root.path(), b"config-v1")
+        .unwrap();
+    assert_eq!(
+        fs::read(root.path().join("resolved-config.toml")).unwrap(),
+        b"config-v1"
+    );
+    assert!(matches!(
+        index.persist_resolved_config(root.path(), b"config-v2"),
+        Err(DatasetOpenError::IncompatibleResolvedConfig)
+    ));
+}
+
+#[test]
 fn index_reports_only_canonical_committed_scene_directories() {
     let root = tempfile::tempdir().unwrap();
     DatasetResumeIndex::open_or_create(root.path(), manifest(b"config")).unwrap();

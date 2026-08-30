@@ -1,12 +1,16 @@
 //! Bounded orchestration for physics, rendering, and dataset commits.
 
 mod benchmark;
+mod cancellation;
 mod request_planner;
 mod serial_generation;
 
 pub use benchmark::{InvalidRenderBenchmarkSummary, RenderBenchmarkSummary};
+pub use cancellation::CancellationToken;
 pub use request_planner::{RenderRequestPlanner, RenderRequestPlanningError};
-pub use serial_generation::{SerialGenerationPipeline, SerialGenerationPipelineError};
+pub use serial_generation::{
+    SerialGenerationPipeline, SerialGenerationPipelineError, SerialRunReport,
+};
 
 use std::{
     fs::File,

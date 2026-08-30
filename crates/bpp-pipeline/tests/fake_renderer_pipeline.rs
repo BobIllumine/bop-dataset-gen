@@ -12,6 +12,7 @@ use bpp_core::{
 };
 use bpp_dataset::{DepthFrame, InstanceFrame, RgbFrame, SceneStagingArea};
 use bpp_physics_rapier::PreparedPhysicsAsset;
+use bpp_pipeline::CancellationToken;
 use bpp_pipeline::{PipelineRenderError, SerialDatasetRenderer, SerialGenerationPipeline};
 
 const REQUEST_JSON: &str = r#"{"schema_version":1,"scene":{"schema_version":1,"scene_id":9,"accepted_attempt":2,"seed_fingerprint":"seed-abc","bin":{"schema_version":1,"inner_dimensions_m":[1.0,2.0,3.0],"floor_thickness_m":0.1,"wall_thickness_m":0.2,"world_from_bin":{"translation":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]},"material_label":"steel"},"instances":[],"physics":{"schema_version":1,"attempts":1,"steps":50,"simulated_seconds":1.0,"final_max_linear_speed_mps":0.1,"final_max_angular_speed_rad_s":0.2,"final_max_penetration_m":0.0,"rejection_counts":[]}},"cameras":[{"schema_version":1,"camera_id":2,"image_size":{"width":2,"height":2},"k":[2.0,0.0,1.0,0.0,2.0,1.0,0.0,0.0,1.0],"camera_from_world":{"camera_from_world":{"translation":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]}},"near_m":0.1,"far_m":10.0}],"appearance":{"schema_version":1,"background_srgb":[0.1,0.2,0.3,1.0],"ambient_light":{"schema_version":1,"color":[1.0,1.0,1.0],"intensity":0.25},"directional_lights":[],"point_lights":[]},"required_channels":{"schema_version":1,"rgb":true,"depth":true,"instance":true}}"#;
@@ -19,12 +20,14 @@ const REQUEST_JSON: &str = r#"{"schema_version":1,"scene":{"schema_version":1,"s
 struct FakeRenderer {
     prepared: bool,
     capabilities: RendererCapabilities,
+    cancel_after_render: Option<CancellationToken>,
 }
 
 impl FakeRenderer {
     fn all_channels() -> Self {
         Self {
             prepared: false,
+            cancel_after_render: None,
             capabilities: RendererCapabilities::new(
                 RenderChannels::try_new(true, true, true).unwrap(),
                 None,
@@ -35,11 +38,18 @@ impl FakeRenderer {
     fn rgb_only() -> Self {
         Self {
             prepared: false,
+            cancel_after_render: None,
             capabilities: RendererCapabilities::new(
                 RenderChannels::try_new(true, false, false).unwrap(),
                 None,
             ),
         }
+    }
+
+    fn cancelling(token: CancellationToken) -> Self {
+        let mut renderer = Self::all_channels();
+        renderer.cancel_after_render = Some(token);
+        renderer
     }
 }
 
@@ -98,6 +108,9 @@ impl Renderer for FakeRenderer {
                 .unwrap()
                 .write_png(&staging.instance_path(camera.camera_id()))
                 .unwrap();
+        }
+        if let Some(token) = &self.cancel_after_render {
+            token.cancel();
         }
         let zero = NonNegativeFinite::try_new(0.0).unwrap();
         Ok(RenderReport::new(
@@ -267,4 +280,95 @@ fn serial_generation_composes_physics_render_validation_and_commit() {
     assert_eq!(scene["scene_id"], 0);
     assert_eq!(scene["instances"].as_array().unwrap().len(), 1);
     assert!(completed.scene_path().join("checksums.json").is_file());
+}
+
+#[test]
+fn serial_run_writes_provenance_and_resumes_without_duplicate_generation() {
+    let root = tempfile::tempdir().unwrap();
+    let resolved_config = include_bytes!("fixtures/serial_run.toml");
+    let plan = RunConfig::from_toml(std::str::from_utf8(resolved_config).unwrap())
+        .unwrap()
+        .into_plan();
+    let visual_catalog = catalog();
+
+    let mut first = SerialGenerationPipeline::try_new(
+        &plan,
+        prepared_assets(),
+        FakeRenderer::all_channels(),
+        root.path(),
+    )
+    .unwrap();
+    let first_report = first
+        .run_to_completion(resolved_config, &visual_catalog)
+        .unwrap();
+    assert_eq!(first_report.preexisting_scene_count(), 0);
+    assert_eq!(first_report.generated_scene_count(), 1);
+    assert_eq!(first_report.total_scene_count(), 1);
+
+    let run: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.path().join("run.json")).unwrap()).unwrap();
+    assert_eq!(run["total_scene_count"], 1);
+    assert_eq!(
+        run["asset_catalog_fingerprint"],
+        visual_catalog.fingerprint()
+    );
+    assert_eq!(run["backend"]["implementation_version"], "fake-v1");
+    assert_eq!(
+        std::fs::read(root.path().join("resolved-config.toml")).unwrap(),
+        resolved_config
+    );
+
+    let mut resumed = SerialGenerationPipeline::try_new(
+        &plan,
+        prepared_assets(),
+        FakeRenderer::all_channels(),
+        root.path(),
+    )
+    .unwrap();
+    let resumed_report = resumed
+        .run_to_completion(resolved_config, &visual_catalog)
+        .unwrap();
+    assert_eq!(resumed_report.preexisting_scene_count(), 1);
+    assert_eq!(resumed_report.generated_scene_count(), 0);
+    assert_eq!(resumed_report.total_scene_count(), 1);
+    assert_eq!(root.path().join("scenes").read_dir().unwrap().count(), 1);
+}
+
+#[test]
+fn serial_run_stops_allocating_scenes_after_cancellation_and_can_resume() {
+    let root = tempfile::tempdir().unwrap();
+    let resolved_config = include_str!("fixtures/serial_run.toml")
+        .replace("valid_scene_count = 1", "valid_scene_count = 2");
+    let plan = RunConfig::from_toml(&resolved_config).unwrap().into_plan();
+    let visual_catalog = catalog();
+    let cancellation = CancellationToken::new();
+    let mut interrupted = SerialGenerationPipeline::try_new(
+        &plan,
+        prepared_assets(),
+        FakeRenderer::cancelling(cancellation.clone()),
+        root.path(),
+    )
+    .unwrap();
+
+    let interrupted_report = interrupted
+        .run_until_cancelled(resolved_config.as_bytes(), &visual_catalog, &cancellation)
+        .unwrap();
+    assert!(interrupted_report.was_cancelled());
+    assert_eq!(interrupted_report.generated_scene_count(), 1);
+    assert_eq!(root.path().join("scenes").read_dir().unwrap().count(), 1);
+
+    let mut resumed = SerialGenerationPipeline::try_new(
+        &plan,
+        prepared_assets(),
+        FakeRenderer::all_channels(),
+        root.path(),
+    )
+    .unwrap();
+    let resumed_report = resumed
+        .run_to_completion(resolved_config.as_bytes(), &visual_catalog)
+        .unwrap();
+    assert!(!resumed_report.was_cancelled());
+    assert_eq!(resumed_report.preexisting_scene_count(), 1);
+    assert_eq!(resumed_report.generated_scene_count(), 1);
+    assert_eq!(root.path().join("scenes").read_dir().unwrap().count(), 2);
 }

@@ -254,6 +254,40 @@ impl DatasetResumeIndex {
                 .then_some(scene_id)
         })
     }
+
+    /// Atomically persists the exact resolved configuration used by this run.
+    ///
+    /// Existing bytes must match exactly. The manifest fingerprint is checked
+    /// before any write so callers cannot publish config bytes for another run.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed compatibility or filesystem failure.
+    pub fn persist_resolved_config(
+        &self,
+        dataset_root: &Path,
+        resolved_config_bytes: &[u8],
+    ) -> Result<(), DatasetOpenError> {
+        if fingerprint_config(resolved_config_bytes) != self.manifest.resolved_config_fingerprint {
+            return Err(DatasetOpenError::IncompatibleResolvedConfig);
+        }
+        let path = dataset_root.join("resolved-config.toml");
+        if !install_bytes_atomically(
+            dataset_root,
+            &path,
+            resolved_config_bytes,
+            "resolved-config.toml",
+        )? {
+            let existing = fs::read(&path).map_err(|source| DatasetOpenError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            if existing != resolved_config_bytes {
+                return Err(DatasetOpenError::IncompatibleResolvedConfig);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Failure to initialize or resume a dataset run.
@@ -291,6 +325,9 @@ pub enum DatasetOpenError {
         /// Rejected directory path.
         path: PathBuf,
     },
+    /// Stored or supplied resolved configuration bytes contradict the manifest.
+    #[error("resolved configuration bytes are incompatible with the dataset manifest")]
+    IncompatibleResolvedConfig,
 }
 
 fn fingerprint_config(bytes: &[u8]) -> String {
@@ -306,15 +343,26 @@ fn install_manifest_atomically(
     manifest_path: &Path,
     manifest: &DatasetManifest,
 ) -> Result<bool, DatasetOpenError> {
-    if manifest_path.exists() {
-        return Ok(false);
-    }
     let mut bytes = serde_json::to_vec(manifest).map_err(DatasetOpenError::SerializeManifest)?;
     bytes.push(b'\n');
+    install_bytes_atomically(dataset_root, manifest_path, &bytes, "run.json")
+}
+
+fn install_bytes_atomically(
+    dataset_root: &Path,
+    target: &Path,
+    bytes: &[u8],
+    temporary_label: &str,
+) -> Result<bool, DatasetOpenError> {
+    if target.exists() {
+        return Ok(false);
+    }
     for _ in 0..1024 {
         let nonce = NEXT_MANIFEST_TEMP_ID.fetch_add(1, Ordering::Relaxed);
-        let temporary =
-            dataset_root.join(format!(".run.json-{}-{nonce:020}.tmp", std::process::id()));
+        let temporary = dataset_root.join(format!(
+            ".{temporary_label}-{}-{nonce:020}.tmp",
+            std::process::id()
+        ));
         let mut file = match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -329,20 +377,20 @@ fn install_manifest_atomically(
                 });
             }
         };
-        if let Err(source) = file.write_all(&bytes).and_then(|()| file.sync_all()) {
+        if let Err(source) = file.write_all(bytes).and_then(|()| file.sync_all()) {
             let _ = fs::remove_file(&temporary);
             return Err(DatasetOpenError::Io {
                 path: temporary,
                 source,
             });
         }
-        let installed = match fs::hard_link(&temporary, manifest_path) {
+        let installed = match fs::hard_link(&temporary, target) {
             Ok(()) => true,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
             Err(source) => {
                 let _ = fs::remove_file(&temporary);
                 return Err(DatasetOpenError::Io {
-                    path: manifest_path.to_owned(),
+                    path: target.to_owned(),
                     source,
                 });
             }
