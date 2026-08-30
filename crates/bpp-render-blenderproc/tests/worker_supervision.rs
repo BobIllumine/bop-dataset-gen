@@ -242,5 +242,18 @@ print('BPP1\t{not-json', flush=True)
         renderer.render_scene(&request, &staging).unwrap();
         bpp_dataset::validate_and_write_checksums(&staging, &request).unwrap();
         assert!(staging.root().join("checksums.json").is_file());
+
+        let second_root = tempfile::tempdir().unwrap();
+        let second =
+            SceneStagingArea::create(second_root.path(), request.scene().scene_id()).unwrap();
+        for camera in request.cameras() {
+            second.prepare_camera(camera.camera_id()).unwrap();
+        }
+        renderer.render_scene(&request, &second).unwrap();
+        assert!(
+            second
+                .instance_path(request.cameras()[0].camera_id())
+                .is_file()
+        );
     }
 }

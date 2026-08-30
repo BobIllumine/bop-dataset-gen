@@ -75,12 +75,13 @@ omit that field and advertise `timestamp_queries=false` in backend provenance.
 ```
 
 The worker is [workers/blenderproc_worker.py](../../workers/blenderproc_worker.py).
-Stdout is reserved for strict protocol-v1 JSON lines; diagnostic output belongs
-on stderr. Startup and requests have independent deadlines, stderr retention is
-bounded, every non-handshake reply must match its request ID, and an unexpected
-render-process death triggers exactly one restart plus catalog preparation
-replay. Protocol/content failures are not retried. Drop requests shutdown and
-then reaps the child defensively.
+Worker replies use `BPP1<TAB>` followed by strict protocol-v1 JSON. The Rust
+supervisor treats other stdout lines emitted by the BlenderProc launcher as
+bounded diagnostics alongside stderr instead of mistaking them for replies.
+Startup and requests have independent deadlines, every non-handshake reply must
+match its request ID, and an unexpected render-process death triggers exactly
+one restart plus catalog preparation replay. Protocol/content failures are not
+retried. Drop requests shutdown and then reaps the child defensively.
 
 Preparation transfers checked canonical meshes, materials, and decoded texture
 pixels once. Rendering applies Rapier poses directly, configures camera
@@ -101,6 +102,15 @@ or vendored with the Rust binaries. The lock resolves BlenderProc 2.7.0 and
 records its complete Python dependency graph. A live worker reports both the
 installed BlenderProc package version and Blender version in backend
 provenance.
+
+The real analytic-triangle cross-backend gate renders the same 64x64 request
+through Metal wgpu and BlenderProc, validates both canonical staging trees, and
+compares geometry rather than RGB. On the development M4 Pro it passed with a
+one-pixel-tolerant visible-mask IoU of 1.0, zero median depth difference, and a
+0.000119 mm p99 depth difference. The gate requires IoU at least 0.97, median
+depth difference at most 1 mm, and p99 at most 5 mm. A second request through
+the same Blender process also passed, covering persistent compositor-output
+reuse and fresh per-request instance labels.
 
 Capability detection never falls back to wgpu. Run
 `cargo run -p bpp-cli --features blenderproc -- doctor --renderer blenderproc`;

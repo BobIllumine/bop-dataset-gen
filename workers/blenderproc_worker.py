@@ -14,6 +14,7 @@ from mathutils import Matrix, Quaternion, Vector
 PROTOCOL_VERSION = 1
 ASSETS: dict[str, dict] = {}
 CATALOG_FINGERPRINT: str | None = None
+OUTPUTS_CONFIGURED = False
 
 
 def blenderproc_version() -> str:
@@ -115,12 +116,15 @@ def clear_scene_instances() -> None:
 
 def configure_scene(request: dict) -> None:
     clear_scene_instances()
+    pass_index = 1
     for instance in request["scene"]["instances"]:
         for mesh in ASSETS[instance["asset_id"]]["meshes"]:
             obj = bpy.data.objects.new(f"instance-{instance['instance_id']}", mesh)
             bpy.context.collection.objects.link(obj)
             obj.matrix_world = transform_matrix(instance["world_from_model"])
             obj["bpp_instance_id"] = instance["instance_id"]
+            obj.pass_index = pass_index
+            pass_index += 1
     appearance = request["appearance"]
     world = bpy.context.scene.world
     world.use_nodes = True
@@ -167,17 +171,20 @@ def direction_to_rotation(direction: np.ndarray):
 
 
 def render(message: dict) -> None:
+    global OUTPUTS_CONFIGURED
     if CATALOG_FINGERPRINT is None:
         raise ValueError("prepare must precede render")
     request = message["request"]
     configure_scene(request)
-    bproc.renderer.enable_depth_output(activate_antialiasing=False)
-    bproc.renderer.enable_segmentation_output(
-        map_by=["cp_bpp_instance_id"],
-        default_values={"cp_bpp_instance_id": 0},
-    )
+    if not OUTPUTS_CONFIGURED:
+        bproc.renderer.enable_depth_output(activate_antialiasing=False)
+        bproc.renderer.enable_segmentation_output(
+            map_by=["bpp_instance_id"],
+            default_values={"bpp_instance_id": 0},
+        )
+        OUTPUTS_CONFIGURED = True
     root = Path(message["output_root"])
-    instance_key = "cp_bpp_instance_id_segmaps"
+    instance_key = "bpp_instance_id_segmaps"
     started = time.perf_counter()
     for camera in request["cameras"]:
         configure_camera(camera)
