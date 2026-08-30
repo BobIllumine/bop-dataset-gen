@@ -137,7 +137,104 @@ for line in sys.stdin:
         staging
             .prepare_camera(request.cameras()[0].camera_id())
             .unwrap();
-        assert!(renderer.render_scene(&request, &staging).is_ok());
+        let report = renderer.render_scene(&request, &staging).unwrap();
+        assert_eq!(report.worker_restart_count(), 1);
         assert!(executable.with_extension("crashed").is_file());
+    }
+
+    #[test]
+    fn handshake_timeout_is_bounded_and_reaps_the_worker() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("timeout-worker.py");
+        fs::write(
+            &executable,
+            r"#!/usr/bin/env python3
+import sys, time
+sys.stdin.readline()
+time.sleep(10)
+",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+        let config =
+            BlenderProcRendererConfig::try_new(&executable, "unused.py", "CPU", 0.05, 0.05, 4096)
+                .unwrap();
+
+        let started = std::time::Instant::now();
+        let Err(error) = BlenderProcRenderer::try_new(config) else {
+            panic!("timeout worker unexpectedly initialized");
+        };
+        assert!(error.to_string().contains("timed out"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn malformed_handshake_is_a_protocol_error_with_bounded_stderr() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("malformed-worker.py");
+        fs::write(
+            &executable,
+            r"#!/usr/bin/env python3
+import sys
+sys.stdin.readline()
+sys.stderr.write('worker diagnostic\n')
+sys.stderr.flush()
+print('{not-json', flush=True)
+",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+        let config =
+            BlenderProcRendererConfig::try_new(&executable, "unused.py", "CPU", 1.0, 1.0, 32)
+                .unwrap();
+
+        let Err(error) = BlenderProcRenderer::try_new(config) else {
+            panic!("malformed worker unexpectedly initialized");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("invalid BlenderProc worker reply"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the pinned BlenderProc and Blender runtime"]
+    fn real_worker_renders_and_validates_the_canonical_three_channels() {
+        let worker = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../workers/blenderproc_worker.py");
+        let config =
+            BlenderProcRendererConfig::try_new("blenderproc", worker, "CPU", 60.0, 300.0, 65_536)
+                .unwrap();
+        let mut renderer = BlenderProcRenderer::try_new(config).unwrap();
+        renderer.prepare(&catalog()).unwrap();
+        let mut request_json: serde_json::Value = serde_json::from_str(REQUEST).unwrap();
+        request_json["scene"]["instances"][0]["world_from_model"]["translation"] =
+            serde_json::json!([0.0, 0.0, 2.0]);
+        let request: RenderSceneRequest = serde_json::from_value(request_json).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let staging = SceneStagingArea::create(root.path(), request.scene().scene_id()).unwrap();
+        fs::write(
+            staging.scene_metadata_path(),
+            serde_json::to_vec(request.scene()).unwrap(),
+        )
+        .unwrap();
+        for camera in request.cameras() {
+            staging.prepare_camera(camera.camera_id()).unwrap();
+            fs::write(
+                staging.frame_metadata_path(camera.camera_id()),
+                serde_json::to_vec(camera).unwrap(),
+            )
+            .unwrap();
+        }
+
+        renderer.render_scene(&request, &staging).unwrap();
+        bpp_dataset::validate_and_write_checksums(&staging, &request).unwrap();
+        assert!(staging.root().join("checksums.json").is_file());
     }
 }

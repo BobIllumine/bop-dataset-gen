@@ -2,6 +2,9 @@
 
 use std::process::ExitCode;
 
+#[cfg(feature = "blenderproc")]
+use bpp_core::Renderer as _;
+
 fn main() -> ExitCode {
     run(std::env::args().skip(1))
 }
@@ -14,18 +17,25 @@ fn run(arguments: impl IntoIterator<Item = String>) -> ExitCode {
             doctor(renderer)
         }
         _ => {
-            eprintln!("usage: bpp doctor [--renderer wgpu]");
+            eprintln!("usage: bpp doctor [--renderer wgpu|blenderproc]");
             ExitCode::from(2)
         }
     }
 }
 
-#[cfg(feature = "wgpu")]
 fn doctor(renderer: &str) -> ExitCode {
-    if renderer != "wgpu" {
-        eprintln!("renderer {renderer:?} is unavailable in this build");
-        return ExitCode::from(3);
+    match renderer {
+        "wgpu" => doctor_wgpu(),
+        "blenderproc" => doctor_blenderproc(),
+        _ => {
+            eprintln!("renderer {renderer:?} is unavailable in this build");
+            ExitCode::from(3)
+        }
     }
+}
+
+#[cfg(feature = "wgpu")]
+fn doctor_wgpu() -> ExitCode {
     let config = bpp_core::WgpuRendererConfig::try_new(
         bpp_core::WgpuDevicePreference::Automatic,
         bpp_core::WgpuAdapterPreference::HighPerformance,
@@ -55,8 +65,48 @@ fn doctor(renderer: &str) -> ExitCode {
 }
 
 #[cfg(not(feature = "wgpu"))]
-fn doctor(renderer: &str) -> ExitCode {
-    eprintln!("renderer {renderer:?} is unavailable in this build");
+fn doctor_wgpu() -> ExitCode {
+    eprintln!("renderer \"wgpu\" is unavailable in this build");
+    ExitCode::from(3)
+}
+
+#[cfg(feature = "blenderproc")]
+fn doctor_blenderproc() -> ExitCode {
+    let worker = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../workers/blenderproc_worker.py");
+    let config = bpp_core::BlenderProcRendererConfig::try_new(
+        "blenderproc",
+        worker,
+        "AUTO",
+        30.0,
+        300.0,
+        65_536,
+    )
+    .expect("fixed doctor configuration");
+    match bpp_render_blenderproc::BlenderProcRenderer::try_new(config) {
+        Ok(renderer) => {
+            let value = serde_json::json!({
+                "renderer": "blenderproc",
+                "available": true,
+                "backend": renderer.info(),
+                "capabilities": renderer.capabilities(),
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&value).expect("report serialization")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("BlenderProc unavailable: {error}");
+            ExitCode::from(3)
+        }
+    }
+}
+
+#[cfg(not(feature = "blenderproc"))]
+fn doctor_blenderproc() -> ExitCode {
+    eprintln!("renderer \"blenderproc\" is unavailable in this build");
     ExitCode::from(3)
 }
 
@@ -80,6 +130,14 @@ mod tests {
                 "doctor".to_owned(),
                 "--renderer".to_owned(),
                 "unknown".to_owned()
+            ]),
+            std::process::ExitCode::from(3)
+        );
+        assert_eq!(
+            run([
+                "doctor".to_owned(),
+                "--renderer".to_owned(),
+                "blenderproc".to_owned()
             ]),
             std::process::ExitCode::from(3)
         );

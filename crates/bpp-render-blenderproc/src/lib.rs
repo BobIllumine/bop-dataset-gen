@@ -275,10 +275,12 @@ impl Renderer for BlenderProcRenderer {
         self.worker
             .send(&payload)
             .map_err(|error| initialization_as_render(&error))?;
+        let mut worker_restart_count = 0;
         let reply = match self.receive_request(request_id) {
             Ok(reply) => reply,
             Err(RenderError::WorkerCrashed { .. }) => {
                 self.restart_and_reprepare()?;
+                worker_restart_count = 1;
                 self.worker
                     .send(&payload)
                     .map_err(|error| initialization_as_render(&error))?;
@@ -319,7 +321,7 @@ impl Renderer for BlenderProcRenderer {
             camera_count,
             request.required_channels(),
             RenderStageTimings::new(zero, render_seconds, zero, encode_seconds),
-            0,
+            worker_restart_count,
         ))
     }
 

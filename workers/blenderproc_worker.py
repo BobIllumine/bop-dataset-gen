@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+from importlib.metadata import version
 from pathlib import Path
 
 import blenderproc as bproc
@@ -58,6 +59,16 @@ def make_material(wire: dict, textures: list[dict]) -> bpy.types.Material:
 
 def prepare(message: dict) -> None:
     global ASSETS, CATALOG_FINGERPRINT
+    clear_scene_instances()
+    for asset in ASSETS.values():
+        for mesh in asset["meshes"]:
+            bpy.data.meshes.remove(mesh)
+    for material in list(bpy.data.materials):
+        if material.name.startswith("bpp-material"):
+            bpy.data.materials.remove(material)
+    for image in list(bpy.data.images):
+        if image.name.startswith("bpp-texture"):
+            bpy.data.images.remove(image)
     prepared: dict[str, dict] = {}
     for asset in message["assets"]:
         materials = [make_material(item, asset["textures"]) for item in asset["materials"]]
@@ -88,7 +99,11 @@ def prepare(message: dict) -> None:
 
 def clear_scene_instances() -> None:
     for obj in list(bpy.context.scene.objects):
-        bpy.data.objects.remove(obj, do_unlink=True)
+        if obj.name.startswith(("instance-", "directional-", "point-")):
+            light = obj.data if isinstance(obj.data, bpy.types.Light) else None
+            bpy.data.objects.remove(obj, do_unlink=True)
+            if light is not None:
+                bpy.data.lights.remove(light)
     bproc.camera.clear_camera_poses()
 
 
@@ -106,6 +121,7 @@ def configure_scene(request: dict) -> None:
     background = world.node_tree.nodes.get("Background")
     background.inputs["Color"].default_value = (*appearance["ambient_light"]["color"], 1.0)
     background.inputs["Strength"].default_value = appearance["ambient_light"]["intensity"]
+    bpy.context.scene.render.film_transparent = True
     for index, light in enumerate(appearance["directional_lights"]):
         data = bpy.data.lights.new(f"directional-{index}", "SUN")
         data.energy = light["illuminance_lux"]
@@ -155,7 +171,12 @@ def render(message: dict) -> None:
         output = bproc.renderer.render()
         directory = root / "frames" / f"{camera['camera_id']:05d}"
         directory.mkdir(parents=True, exist_ok=True)
-        np.asarray(output["colors"][0], dtype=np.uint8)[..., :3].tofile(directory / "rgb.u8")
+        color = np.asarray(output["colors"][0], dtype=np.float32)
+        if color.shape[-1] == 4:
+            alpha = color[..., 3:4] / 255.0
+            background = np.asarray(request["appearance"]["background_srgb"][:3], dtype=np.float32) * 255.0
+            color = color[..., :3] * alpha + background * (1.0 - alpha)
+        np.clip(color[..., :3], 0.0, 255.0).astype(np.uint8).tofile(directory / "rgb.u8")
         np.asarray(output["depth"][0], dtype="<f4").tofile(directory / "depth.f32le")
         np.asarray(output[instance_key][0], dtype="<u2").tofile(directory / "instance.u16le")
     elapsed = time.perf_counter() - started
@@ -170,7 +191,8 @@ def main() -> None:
             checked(message)
             kind = message["type"]
             if kind == "hello":
-                reply("ready", implementation_version="blenderproc", device_name=message["device_selection"])
+                implementation = f"blenderproc-{version('blenderproc')};blender-{bpy.app.version_string}"
+                reply("ready", implementation_version=implementation, device_name=message["device_selection"])
             elif kind == "prepare":
                 prepare(message)
             elif kind == "render":

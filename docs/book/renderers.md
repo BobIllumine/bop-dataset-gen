@@ -97,7 +97,19 @@ scene corpus through both backends into separate dataset roots.
 
 The optional runtime environment is pinned in
 `tools/blenderproc-worker/pyproject.toml` and `uv.lock`; it is not linked into
-or vendored with the Rust binaries.
+or vendored with the Rust binaries. The lock resolves BlenderProc 2.7.0 and
+records its complete Python dependency graph. A live worker reports both the
+installed BlenderProc package version and Blender version in backend
+provenance.
+
+Capability detection never falls back to wgpu. Run
+`cargo run -p bpp-cli --features blenderproc -- doctor --renderer blenderproc`;
+an absent executable, failed handshake, or incompatible runtime exits with
+capability code 3. The ignored `real_worker_renders_and_validates_the_canonical_three_channels`
+test becomes the real-runtime acceptance gate after installation. Fake workers
+cover bounded handshake timeout, malformed JSON, persistent reuse, exact
+request IDs, one crash/reprepare retry, canonical encoding, and shutdown in
+normal CI.
 
 ## Verification
 
