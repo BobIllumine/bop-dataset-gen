@@ -22,6 +22,7 @@ use thiserror::Error;
 
 /// Exact JSON-lines protocol version shared with the Python worker.
 pub const PROTOCOL_VERSION: u16 = 1;
+const PROTOCOL_REPLY_PREFIX: &str = "BPP1\t";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Serde guard that accepts only [`PROTOCOL_VERSION`].
@@ -176,6 +177,9 @@ impl BlenderProcRenderer {
                 device_name,
                 ..
             } => (implementation_version, device_name),
+            WorkerReply::Error { code, message, .. } => {
+                return Err(BlenderProcInitializationError::Worker { code, message });
+            }
             reply => {
                 return Err(BlenderProcInitializationError::UnexpectedReply(reply_kind(
                     &reply,
@@ -425,11 +429,23 @@ fn texture_wire(texture: &Texture) -> TextureWire<'_> {
     }
 }
 
+fn append_diagnostic(tail: &Mutex<VecDeque<u8>>, capacity: usize, bytes: &[u8]) {
+    if let Ok(mut tail) = tail.lock() {
+        for byte in bytes {
+            if tail.len() == capacity {
+                tail.pop_front();
+            }
+            tail.push_back(*byte);
+        }
+    }
+}
+
 struct Worker {
     child: Child,
     stdin: ChildStdin,
     stdout: mpsc::Receiver<Result<String, std::io::Error>>,
     stderr_tail: Arc<Mutex<VecDeque<u8>>>,
+    diagnostic_capacity: usize,
 }
 
 impl Worker {
@@ -469,12 +485,7 @@ impl Worker {
         let capacity = usize::try_from(config.stderr_tail_capacity()).unwrap_or(usize::MAX);
         thread::spawn(move || {
             for byte in BufReader::new(stderr).bytes().flatten() {
-                if let Ok(mut tail) = stderr_capture.lock() {
-                    if tail.len() == capacity {
-                        tail.pop_front();
-                    }
-                    tail.push_back(byte);
-                }
+                append_diagnostic(&stderr_capture, capacity, &[byte]);
             }
         });
         Ok(Self {
@@ -482,6 +493,7 @@ impl Worker {
             stdin,
             stdout: receiver,
             stderr_tail,
+            diagnostic_capacity: capacity,
         })
     }
 
@@ -500,24 +512,38 @@ impl Worker {
         &mut self,
         timeout: Duration,
     ) -> Result<WorkerReply, BlenderProcInitializationError> {
-        match self.stdout.recv_timeout(timeout) {
-            Ok(Ok(line)) => {
-                serde_json::from_str(&line).map_err(BlenderProcInitializationError::Protocol)
-            }
-            Ok(Err(error)) => Err(BlenderProcInitializationError::Read(error)),
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(BlenderProcInitializationError::Timeout {
-                stderr_tail: self.stderr_tail(),
-            }),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                Err(BlenderProcInitializationError::Exited {
-                    status: self
-                        .child
-                        .try_wait()
-                        .ok()
-                        .flatten()
-                        .map(|status| status.to_string()),
-                    stderr_tail: self.stderr_tail(),
-                })
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match self.stdout.recv_timeout(remaining) {
+                Ok(Ok(line)) => {
+                    if let Some(payload) = line.strip_prefix(PROTOCOL_REPLY_PREFIX) {
+                        return serde_json::from_str(payload)
+                            .map_err(BlenderProcInitializationError::Protocol);
+                    }
+                    append_diagnostic(
+                        &self.stderr_tail,
+                        self.diagnostic_capacity,
+                        format!("{line}\n").as_bytes(),
+                    );
+                }
+                Ok(Err(error)) => return Err(BlenderProcInitializationError::Read(error)),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(BlenderProcInitializationError::Timeout {
+                        stderr_tail: self.stderr_tail(),
+                    });
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(BlenderProcInitializationError::Exited {
+                        status: self
+                            .child
+                            .try_wait()
+                            .ok()
+                            .flatten()
+                            .map(|status| status.to_string()),
+                        stderr_tail: self.stderr_tail(),
+                    });
+                }
             }
         }
     }
@@ -648,6 +674,14 @@ pub enum BlenderProcInitializationError {
     /// Worker replied with a different message kind.
     #[error("expected BlenderProc ready reply, received {0}")]
     UnexpectedReply(&'static str),
+    /// Worker startup returned a structured failure.
+    #[error("BlenderProc worker failed during initialization ({code}): {message}")]
+    Worker {
+        /// Stable exception or error class.
+        code: String,
+        /// Worker-provided diagnostic.
+        message: String,
+    },
     /// Worker provenance violated the shared backend contract.
     #[error(transparent)]
     InvalidProvenance(#[from] bpp_core::InvalidBackendInfoError),
@@ -665,7 +699,8 @@ fn initialization_as_render(error: &BlenderProcInitializationError) -> RenderErr
             message: error.to_string(),
         },
         BlenderProcInitializationError::Protocol(_)
-        | BlenderProcInitializationError::UnexpectedReply(_) => RenderError::Protocol {
+        | BlenderProcInitializationError::UnexpectedReply(_)
+        | BlenderProcInitializationError::Worker { .. } => RenderError::Protocol {
             message: error.to_string(),
         },
         _ => RenderError::BackendUnavailable {

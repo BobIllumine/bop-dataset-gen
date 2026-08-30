@@ -1,14 +1,12 @@
-"""Persistent BlenderProc worker for the bpp JSON-lines protocol v1."""
+import blenderproc as bproc
 
-from __future__ import annotations
+"""Persistent BlenderProc worker for the bpp JSON-lines protocol v1."""
 
 import json
 import sys
 import time
-from importlib.metadata import version
 from pathlib import Path
 
-import blenderproc as bproc
 import bpy
 import numpy as np
 from mathutils import Matrix, Quaternion, Vector
@@ -18,8 +16,17 @@ ASSETS: dict[str, dict] = {}
 CATALOG_FINGERPRINT: str | None = None
 
 
+def blenderproc_version() -> str:
+    package_root = Path(bproc.__file__).resolve().parent.parent
+    candidates = sorted(package_root.glob("blenderproc-*.dist-info"))
+    if candidates:
+        return candidates[0].name.removeprefix("blenderproc-").removesuffix(".dist-info")
+    return "unknown"
+
+
 def reply(kind: str, **fields: object) -> None:
-    print(json.dumps({"protocol_version": PROTOCOL_VERSION, "type": kind, **fields}, separators=(",", ":")), flush=True)
+    payload = json.dumps({"protocol_version": PROTOCOL_VERSION, "type": kind, **fields}, separators=(",", ":"))
+    print(f"BPP1\t{payload}", flush=True)
 
 
 def checked(message: dict) -> None:
@@ -104,7 +111,6 @@ def clear_scene_instances() -> None:
             bpy.data.objects.remove(obj, do_unlink=True)
             if light is not None:
                 bpy.data.lights.remove(light)
-    bproc.camera.clear_camera_poses()
 
 
 def configure_scene(request: dict) -> None:
@@ -140,15 +146,19 @@ def configure_scene(request: dict) -> None:
 
 
 def configure_camera(camera: dict) -> None:
-    bproc.camera.clear_camera_poses()
     width, height = camera["image_size"]["width"], camera["image_size"]["height"]
     bproc.camera.set_intrinsics_from_K_matrix(np.asarray(camera["k"]).reshape((3, 3)), width, height)
     camera_from_world = transform_matrix(camera["camera_from_world"]["camera_from_world"])
     world_from_cv = camera_from_world.inverted()
     world_from_blender = world_from_cv @ Matrix.Diagonal((1.0, -1.0, -1.0, 1.0))
-    bproc.camera.add_camera_pose(np.asarray(world_from_blender))
-    bpy.context.scene.camera.data.clip_start = camera["near_m"]
-    bpy.context.scene.camera.data.clip_end = camera["far_m"]
+    camera_object = bpy.context.scene.camera
+    camera_object.animation_data_clear()
+    camera_object.matrix_world = world_from_blender
+    camera_object.data.clip_start = camera["near_m"]
+    camera_object.data.clip_end = camera["far_m"]
+    bpy.context.scene.frame_start = 0
+    bpy.context.scene.frame_end = 1
+    bpy.context.scene.frame_set(0)
 
 
 def direction_to_rotation(direction: np.ndarray):
@@ -162,7 +172,10 @@ def render(message: dict) -> None:
     request = message["request"]
     configure_scene(request)
     bproc.renderer.enable_depth_output(activate_antialiasing=False)
-    bproc.renderer.enable_segmentation_output(map_by=["cp_bpp_instance_id"])
+    bproc.renderer.enable_segmentation_output(
+        map_by=["cp_bpp_instance_id"],
+        default_values={"cp_bpp_instance_id": 0},
+    )
     root = Path(message["output_root"])
     instance_key = "cp_bpp_instance_id_segmaps"
     started = time.perf_counter()
@@ -191,7 +204,7 @@ def main() -> None:
             checked(message)
             kind = message["type"]
             if kind == "hello":
-                implementation = f"blenderproc-{version('blenderproc')};blender-{bpy.app.version_string}"
+                implementation = f"blenderproc-{blenderproc_version()};blender-{bpy.app.version_string}"
                 reply("ready", implementation_version=implementation, device_name=message["device_selection"])
             elif kind == "prepare":
                 prepare(message)

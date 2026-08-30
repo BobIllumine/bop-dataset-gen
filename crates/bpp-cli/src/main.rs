@@ -72,15 +72,12 @@ fn doctor_wgpu() -> ExitCode {
 
 #[cfg(feature = "blenderproc")]
 fn doctor_blenderproc() -> ExitCode {
+    let executable =
+        std::env::var_os("BPP_BLENDERPROC_EXECUTABLE").unwrap_or_else(|| "blenderproc".into());
     let worker = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../workers/blenderproc_worker.py");
     let config = bpp_core::BlenderProcRendererConfig::try_new(
-        "blenderproc",
-        worker,
-        "AUTO",
-        30.0,
-        300.0,
-        65_536,
+        executable, worker, "AUTO", 30.0, 300.0, 65_536,
     )
     .expect("fixed doctor configuration");
     match bpp_render_blenderproc::BlenderProcRenderer::try_new(config) {

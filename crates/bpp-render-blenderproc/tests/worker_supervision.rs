@@ -56,6 +56,7 @@ mod unix {
         let executable = temp.path().join("fake-worker.py");
         fs::write(&executable, r#"#!/usr/bin/env python3
 import json, pathlib, struct, sys
+print('launcher noise before protocol', flush=True)
 for line in sys.stdin:
  m=json.loads(line); t=m['type']; v={'protocol_version':1}
  if t=='hello': r={**v,'type':'ready','implementation_version':'fake-1','device_name':'CPU'}
@@ -66,7 +67,7 @@ for line in sys.stdin:
   r={**v,'type':'rendered','request_id':m['request_id'],'scene_id':m['request']['scene']['scene_id'],'render_seconds':0.01}
  elif t=='flush': r={**v,'type':'flushed','request_id':m['request_id']}
  elif t=='shutdown': break
- print(json.dumps(r),flush=True)
+ print('BPP1\t'+json.dumps(r),flush=True)
 "#).unwrap();
         let mut permissions = fs::metadata(&executable).unwrap().permissions();
         permissions.set_mode(0o755);
@@ -122,7 +123,7 @@ for line in sys.stdin:
   r={**v,'type':'rendered','request_id':m['request_id'],'scene_id':m['request']['scene']['scene_id'],'render_seconds':0.01}
  elif t=='shutdown': break
  else: r={**v,'type':'flushed','request_id':m['request_id']}
- print(json.dumps(r),flush=True)
+ print('BPP1\t'+json.dumps(r),flush=True)
 "#).unwrap();
         let mut permissions = fs::metadata(&executable).unwrap().permissions();
         permissions.set_mode(0o755);
@@ -181,7 +182,7 @@ import sys
 sys.stdin.readline()
 sys.stderr.write('worker diagnostic\n')
 sys.stderr.flush()
-print('{not-json', flush=True)
+print('BPP1\t{not-json', flush=True)
 ",
         )
         .unwrap();
@@ -206,16 +207,21 @@ print('{not-json', flush=True)
     #[test]
     #[ignore = "requires the pinned BlenderProc and Blender runtime"]
     fn real_worker_renders_and_validates_the_canonical_three_channels() {
+        let executable =
+            std::env::var_os("BPP_BLENDERPROC_EXECUTABLE").unwrap_or_else(|| "blenderproc".into());
         let worker = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../workers/blenderproc_worker.py");
         let config =
-            BlenderProcRendererConfig::try_new("blenderproc", worker, "CPU", 60.0, 300.0, 65_536)
+            BlenderProcRendererConfig::try_new(executable, worker, "CPU", 60.0, 300.0, 65_536)
                 .unwrap();
         let mut renderer = BlenderProcRenderer::try_new(config).unwrap();
         renderer.prepare(&catalog()).unwrap();
         let mut request_json: serde_json::Value = serde_json::from_str(REQUEST).unwrap();
         request_json["scene"]["instances"][0]["world_from_model"]["translation"] =
             serde_json::json!([0.0, 0.0, 2.0]);
+        request_json["cameras"][0]["image_size"] = serde_json::json!({"width": 4, "height": 4});
+        request_json["cameras"][0]["k"] =
+            serde_json::json!([4.0, 0.0, 2.0, 0.0, 4.0, 2.0, 0.0, 0.0, 1.0]);
         let request: RenderSceneRequest = serde_json::from_value(request_json).unwrap();
         let root = tempfile::tempdir().unwrap();
         let staging = SceneStagingArea::create(root.path(), request.scene().scene_id()).unwrap();
