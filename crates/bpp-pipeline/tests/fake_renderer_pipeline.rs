@@ -12,7 +12,7 @@ use bpp_core::{
 };
 use bpp_dataset::{DepthFrame, InstanceFrame, RgbFrame, SceneStagingArea};
 use bpp_physics_rapier::PreparedPhysicsAsset;
-use bpp_pipeline::CancellationToken;
+use bpp_pipeline::{CancellationToken, SerialSnapshotRenderer, SerialSnapshotSimulator};
 use bpp_pipeline::{PipelineRenderError, SerialDatasetRenderer, SerialGenerationPipeline};
 
 const REQUEST_JSON: &str = r#"{"schema_version":1,"scene":{"schema_version":1,"scene_id":9,"accepted_attempt":2,"seed_fingerprint":"seed-abc","bin":{"schema_version":1,"inner_dimensions_m":[1.0,2.0,3.0],"floor_thickness_m":0.1,"wall_thickness_m":0.2,"world_from_bin":{"translation":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]},"material_label":"steel"},"instances":[],"physics":{"schema_version":1,"attempts":1,"steps":50,"simulated_seconds":1.0,"final_max_linear_speed_mps":0.1,"final_max_angular_speed_rad_s":0.2,"final_max_penetration_m":0.0,"rejection_counts":[]}},"cameras":[{"schema_version":1,"camera_id":2,"image_size":{"width":2,"height":2},"k":[2.0,0.0,1.0,0.0,2.0,1.0,0.0,0.0,1.0],"camera_from_world":{"camera_from_world":{"translation":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]}},"near_m":0.1,"far_m":10.0}],"appearance":{"schema_version":1,"background_srgb":[0.1,0.2,0.3,1.0],"ambient_light":{"schema_version":1,"color":[1.0,1.0,1.0],"intensity":0.25},"directional_lights":[],"point_lights":[]},"required_channels":{"schema_version":1,"rgb":true,"depth":true,"instance":true}}"#;
@@ -371,4 +371,39 @@ fn serial_run_stops_allocating_scenes_after_cancellation_and_can_resume() {
     assert_eq!(resumed_report.preexisting_scene_count(), 1);
     assert_eq!(resumed_report.generated_scene_count(), 1);
     assert_eq!(root.path().join("scenes").read_dir().unwrap().count(), 2);
+}
+
+#[test]
+fn simulation_corpus_feeds_render_only_pipeline_without_physics_reexecution() {
+    let snapshots_root = tempfile::tempdir().unwrap();
+    let dataset_root = tempfile::tempdir().unwrap();
+    let resolved_config = include_str!("fixtures/serial_run.toml")
+        .replace("valid_scene_count = 1", "valid_scene_count = 2");
+    let plan = RunConfig::from_toml(&resolved_config).unwrap().into_plan();
+    let cancellation = CancellationToken::new();
+    let simulator = SerialSnapshotSimulator::try_new(&plan, prepared_assets()).unwrap();
+
+    let simulation = simulator.run(snapshots_root.path(), &cancellation).unwrap();
+    assert_eq!(simulation.generated_scene_count(), 2);
+
+    let visual_catalog = catalog();
+    let mut renderer =
+        SerialSnapshotRenderer::new(&plan, FakeRenderer::all_channels(), dataset_root.path());
+    let rendering = renderer
+        .run_to_completion(
+            resolved_config.as_bytes(),
+            &visual_catalog,
+            snapshots_root.path(),
+        )
+        .unwrap();
+    assert_eq!(rendering.generated_scene_count(), 2);
+    assert_eq!(
+        dataset_root
+            .path()
+            .join("scenes")
+            .read_dir()
+            .unwrap()
+            .count(),
+        2
+    );
 }

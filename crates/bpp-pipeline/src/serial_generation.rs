@@ -166,6 +166,20 @@ pub struct SerialRunReport {
 }
 
 impl SerialRunReport {
+    pub(crate) const fn new(
+        preexisting_scene_count: u64,
+        generated_scene_count: u64,
+        total_scene_count: u64,
+        was_cancelled: bool,
+    ) -> Self {
+        Self {
+            preexisting_scene_count,
+            generated_scene_count,
+            total_scene_count,
+            was_cancelled,
+        }
+    }
+
     /// Returns scenes already atomically committed when the run opened.
     #[must_use]
     pub const fn preexisting_scene_count(self) -> u64 {

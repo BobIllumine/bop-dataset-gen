@@ -2,11 +2,13 @@
 
 mod frames;
 mod resume;
+mod snapshot_corpus;
 mod staging;
 mod validation;
 
 pub use frames::{DepthFrame, FrameValidationError, FrameWriteError, InstanceFrame, RgbFrame};
 pub use resume::{DatasetManifest, DatasetManifestError, DatasetOpenError, DatasetResumeIndex};
+pub use snapshot_corpus::{SnapshotCorpusError, read_snapshot_corpus, write_scene_snapshot};
 pub use staging::{
     InvalidSceneArtifactRequirements, SceneArtifactRequirements, SceneCommitError, SceneStagingArea,
 };

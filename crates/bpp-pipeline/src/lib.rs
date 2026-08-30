@@ -4,12 +4,17 @@ mod benchmark;
 mod cancellation;
 mod request_planner;
 mod serial_generation;
+mod snapshot_pipeline;
 
 pub use benchmark::{InvalidRenderBenchmarkSummary, RenderBenchmarkSummary};
 pub use cancellation::CancellationToken;
 pub use request_planner::{RenderRequestPlanner, RenderRequestPlanningError};
 pub use serial_generation::{
     SerialGenerationPipeline, SerialGenerationPipelineError, SerialRunReport,
+};
+pub use snapshot_pipeline::{
+    SerialSnapshotRenderError, SerialSnapshotRenderer, SerialSnapshotSimulationError,
+    SerialSnapshotSimulator,
 };
 
 use std::{
