@@ -227,6 +227,7 @@ dependencies = [
  "bpp-core",
  "bpp-dataset",
  "bpp-physics-rapier",
+ "glam 0.30.10",
  "serde",
  "serde_json",
  "tempfile",

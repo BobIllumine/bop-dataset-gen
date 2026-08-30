@@ -8,9 +8,11 @@ use bpp_assets::{
 use bpp_core::{
     AssetId, BackendInfo, BackendKind, NonNegativeFinite, RenderChannels, RenderError,
     RenderReport, RenderSceneRequest, RenderStageTimings, Renderer, RendererCapabilities,
+    RunConfig, SceneId,
 };
 use bpp_dataset::{DepthFrame, InstanceFrame, RgbFrame, SceneStagingArea};
-use bpp_pipeline::{PipelineRenderError, SerialDatasetRenderer};
+use bpp_physics_rapier::PreparedPhysicsAsset;
+use bpp_pipeline::{PipelineRenderError, SerialDatasetRenderer, SerialGenerationPipeline};
 
 const REQUEST_JSON: &str = r#"{"schema_version":1,"scene":{"schema_version":1,"scene_id":9,"accepted_attempt":2,"seed_fingerprint":"seed-abc","bin":{"schema_version":1,"inner_dimensions_m":[1.0,2.0,3.0],"floor_thickness_m":0.1,"wall_thickness_m":0.2,"world_from_bin":{"translation":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]},"material_label":"steel"},"instances":[],"physics":{"schema_version":1,"attempts":1,"steps":50,"simulated_seconds":1.0,"final_max_linear_speed_mps":0.1,"final_max_angular_speed_rad_s":0.2,"final_max_penetration_m":0.0,"rejection_counts":[]}},"cameras":[{"schema_version":1,"camera_id":2,"image_size":{"width":2,"height":2},"k":[2.0,0.0,1.0,0.0,2.0,1.0,0.0,0.0,1.0],"camera_from_world":{"camera_from_world":{"translation":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]}},"near_m":0.1,"far_m":10.0}],"appearance":{"schema_version":1,"background_srgb":[0.1,0.2,0.3,1.0],"ambient_light":{"schema_version":1,"color":[1.0,1.0,1.0],"intensity":0.25},"directional_lights":[],"point_lights":[]},"required_channels":{"schema_version":1,"rgb":true,"depth":true,"instance":true}}"#;
 
@@ -142,11 +144,35 @@ fn catalog() -> ResolvedAssetCatalog {
         .unwrap(),
     );
     ResolvedAssetCatalog::try_new(vec![ResolvedAsset::new(
-        AssetId::new("tetrahedron").unwrap(),
+        AssetId::new("cube").unwrap(),
         *blake3::hash(b"tetrahedron").as_bytes(),
         asset,
     )])
     .unwrap()
+}
+
+fn prepared_assets() -> BTreeMap<AssetId, Arc<PreparedPhysicsAsset>> {
+    let part = ConvexPart::try_new(
+        vec![
+            [-0.05, -0.05, -0.05],
+            [0.05, -0.05, -0.05],
+            [0.05, 0.05, -0.05],
+            [-0.05, 0.05, -0.05],
+            [-0.05, -0.05, 0.05],
+            [0.05, -0.05, 0.05],
+            [0.05, 0.05, 0.05],
+            [-0.05, 0.05, 0.05],
+        ],
+        vec![
+            0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 1, 2, 6, 1, 6, 5, 2, 3, 7, 2, 7,
+            6, 3, 0, 4, 3, 4, 7,
+        ],
+    )
+    .unwrap();
+    BTreeMap::from([(
+        AssetId::new("cube").unwrap(),
+        Arc::new(PreparedPhysicsAsset::try_new(&[part]).unwrap()),
+    )])
 }
 
 #[test]
@@ -217,4 +243,28 @@ fn capability_failure_happens_before_any_staging_side_effect() {
         ))
     ));
     assert!(!root.path().join(".staging").exists());
+}
+
+#[test]
+fn serial_generation_composes_physics_render_validation_and_commit() {
+    let root = tempfile::tempdir().unwrap();
+    let plan = RunConfig::from_toml(include_str!("fixtures/serial_run.toml"))
+        .unwrap()
+        .into_plan();
+    let mut pipeline = SerialGenerationPipeline::try_new(
+        &plan,
+        prepared_assets(),
+        FakeRenderer::all_channels(),
+        root.path(),
+    )
+    .unwrap();
+    pipeline.prepare(&catalog()).unwrap();
+
+    let completed = pipeline.generate_and_commit(SceneId::new(0)).unwrap();
+    let scene: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(completed.scene_path().join("scene.json")).unwrap())
+            .unwrap();
+    assert_eq!(scene["scene_id"], 0);
+    assert_eq!(scene["instances"].as_array().unwrap().len(), 1);
+    assert!(completed.scene_path().join("checksums.json").is_file());
 }
