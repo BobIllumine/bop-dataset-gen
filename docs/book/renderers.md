@@ -30,7 +30,15 @@ before conversion to the canonical `u16` frame. Each camera's three channel
 buffers are mapped together, and a fixed three-frame readback ring submits
 later cameras before waiting on the oldest frame. This bounds GPU staging
 memory while overlapping rendering and mapping across cameras. Row padding is
-removed on the CPU before encoding.
+removed on the CPU before encoding. Buffer-map failures, dropped callbacks,
+poll failures, and device-loss callbacks become render errors before any frame
+is published; abandoned staging directories remain removable by the dataset
+layer.
+
+When `rgb_fxaa` is enabled, the scene color target is filtered by a dedicated
+fullscreen FXAA pass before readback. Metric depth and integer instance labels
+never enter that pass and remain single-sampled, preserving their exact
+geometric and categorical contracts.
 
 The shader supports base-color factors, metallic/roughness response, ambient
 light, and up to eight directional plus eight inverse-square point lights. The
@@ -49,11 +57,14 @@ cargo test -p bpp-render-wgpu --release --locked --lib \
   -- --ignored --nocapture
 ```
 
-On the development M4 Pro, the 32x32 lit analytic-triangle render, shadow pass,
-and three-channel readback median was 343.083 microseconds over 31 measured
-iterations on 2026-08-28. This is a smoke-scale baseline, not a cross-backend
-performance claim. The three-camera transactional hardware test also passed
+On the development M4 Pro, the 32x32 lit analytic-triangle render, shadow and
+FXAA passes, timestamp resolve, and three-channel readback median was 472.458
+microseconds over 31 measured iterations on 2026-08-30. This is a smoke-scale
+baseline, not a cross-backend performance claim. The three-camera transactional hardware test also passed
 canonical decode, label, depth, checksum, and atomic-publication validation.
+When the adapter exposes timestamp queries, reports include `gpu_seconds`
+separately from wall-clock render and encoding stages; unsupported adapters
+omit that field and advertise `timestamp_queries=false` in backend provenance.
 
 ## BlenderProc backend
 

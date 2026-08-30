@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::{
     num::NonZeroU32,
-    sync::mpsc,
+    sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant},
 };
 
@@ -73,6 +73,12 @@ pub struct WgpuRenderer {
     camera_layout: wgpu::BindGroupLayout,
     draws_layout: wgpu::BindGroupLayout,
     shadow_layout: wgpu::BindGroupLayout,
+    fxaa_pipeline: wgpu::RenderPipeline,
+    fxaa_layout: wgpu::BindGroupLayout,
+    fxaa_sampler: wgpu::Sampler,
+    timestamp_queries: bool,
+    timestamp_period_ns: f32,
+    device_loss: Arc<Mutex<Option<String>>>,
     prepared: Option<PreparedGpuCatalog>,
 }
 
@@ -101,6 +107,7 @@ struct ReadbackFrame {
     rgba8: Vec<u8>,
     depth: Vec<f32>,
     instance: Vec<u16>,
+    gpu_seconds: Option<f32>,
 }
 
 struct PendingReadback {
@@ -111,6 +118,13 @@ struct PendingReadback {
     rgb_mapping: mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
     depth_mapping: mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
     instance_mapping: mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+    timestamp: Option<PendingTimestamp>,
+}
+
+struct PendingTimestamp {
+    buffer: wgpu::Buffer,
+    mapping: mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+    period_ns: f32,
 }
 
 const READBACK_RING_CAPACITY: usize = 3;
@@ -138,6 +152,21 @@ struct ShadowResources {
     _texture: wgpu::Texture,
     view: wgpu::TextureView,
     bind_group: wgpu::BindGroup,
+}
+
+struct TimestampResources {
+    query_set: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
+    readback: wgpu::Buffer,
+}
+
+struct ScenePassInputs<'a> {
+    targets: TargetViews<'a>,
+    clear: [f32; 4],
+    bindings: Option<&'a SceneBindings>,
+    draw_calls: &'a [DrawCall<'a>],
+    shadow: Option<&'a ShadowResources>,
+    timestamp_query_set: Option<&'a wgpu::QuerySet>,
 }
 
 impl WgpuRenderer {
@@ -178,12 +207,23 @@ impl WgpuRenderer {
                 adapter_preference: config.adapter_preference(),
             })?;
 
+        let timestamp_queries = adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
         let descriptor = wgpu::DeviceDescriptor {
             label: Some("bpp-render-wgpu"),
+            required_features: if timestamp_queries {
+                wgpu::Features::TIMESTAMP_QUERY
+            } else {
+                wgpu::Features::empty()
+            },
             ..Default::default()
         };
         let (device, queue) = pollster::block_on(adapter.request_device(&descriptor))
             .map_err(WgpuInitializationError::RequestDevice)?;
+        let device_loss = Arc::new(Mutex::new(None));
+        let callback_state = Arc::clone(&device_loss);
+        device.set_device_lost_callback(move |reason, message| {
+            record_device_loss(&callback_state, format!("{reason:?}: {message}"));
+        });
         for format in [
             wgpu::TextureFormat::Rgba8UnormSrgb,
             wgpu::TextureFormat::R32Float,
@@ -207,10 +247,18 @@ impl WgpuRenderer {
         }
         let (render_pipeline, shadow_pipeline, camera_layout, draws_layout, shadow_layout) =
             create_scene_pipeline(&device);
-        let info = backend_info(&adapter_info, &adapter.limits())?;
+        let (fxaa_pipeline, fxaa_layout) = create_fxaa_pipeline(&device);
+        let fxaa_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("bpp FXAA sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let info = backend_info(&adapter_info, &adapter.limits(), timestamp_queries)?;
         let channels = RenderChannels::try_new(true, true, true)
             .map_err(|_| WgpuInitializationError::InternalInvariant)?;
         let capabilities = RendererCapabilities::new(channels, None);
+        let timestamp_period_ns = queue.get_timestamp_period();
         Ok(Self {
             config,
             info,
@@ -224,6 +272,12 @@ impl WgpuRenderer {
             camera_layout,
             draws_layout,
             shadow_layout,
+            fxaa_pipeline,
+            fxaa_layout,
+            fxaa_sampler,
+            timestamp_queries,
+            timestamp_period_ns,
+            device_loss,
             prepared: None,
         })
     }
@@ -430,6 +484,18 @@ impl WgpuRenderer {
             "instance",
         );
         let rgb_view = rgb.create_view(&wgpu::TextureViewDescriptor::default());
+        let fxaa_source = self.config.rgb_fxaa().then(|| {
+            create_sampled_target(
+                &self.device,
+                extent,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                "FXAA source",
+            )
+        });
+        let fxaa_source_view = fxaa_source
+            .as_ref()
+            .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()));
+        let scene_rgb_view = fxaa_source_view.as_ref().unwrap_or(&rgb_view);
         let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
         let instance_view = instance.create_view(&wgpu::TextureViewDescriptor::default());
         let depth_test = create_target(
@@ -447,6 +513,7 @@ impl WgpuRenderer {
             .zip((!draw_uniforms.is_empty()).then_some(draw_uniforms))
             .map(|(camera, draws)| self.create_scene_bindings(camera, draws));
         let shadow = bindings.as_ref().map(|_| self.create_shadow_resources());
+        let timestamp = self.create_timestamp_resources();
 
         let mut encoder = self
             .device
@@ -455,17 +522,27 @@ impl WgpuRenderer {
             });
         self.encode_scene_pass(
             &mut encoder,
-            &TargetViews {
-                rgb: &rgb_view,
-                depth: &depth_view,
-                instance: &instance_view,
-                depth_test: &depth_test_view,
+            &ScenePassInputs {
+                targets: TargetViews {
+                    rgb: scene_rgb_view,
+                    depth: &depth_view,
+                    instance: &instance_view,
+                    depth_test: &depth_test_view,
+                },
+                clear: linear,
+                bindings: bindings.as_ref(),
+                draw_calls,
+                shadow: shadow.as_ref(),
+                timestamp_query_set: timestamp.as_ref().map(|resources| &resources.query_set),
             },
-            linear,
-            bindings.as_ref(),
-            draw_calls,
-            shadow.as_ref(),
         );
+        if let Some(source_view) = &fxaa_source_view {
+            self.encode_fxaa_pass(&mut encoder, source_view, &rgb_view, width, height);
+        }
+        if let Some(timestamp) = &timestamp {
+            encoder.resolve_query_set(&timestamp.query_set, 0..2, &timestamp.resolve, 0);
+            encoder.copy_buffer_to_buffer(&timestamp.resolve, 0, &timestamp.readback, 0, 16);
+        }
         rgb_readback.copy_from(&mut encoder, &rgb, extent);
         depth_readback.copy_from(&mut encoder, &depth, extent);
         instance_readback.copy_from(&mut encoder, &instance, extent);
@@ -473,6 +550,7 @@ impl WgpuRenderer {
         let rgb_mapping = rgb_readback.begin_read();
         let depth_mapping = depth_readback.begin_read();
         let instance_mapping = instance_readback.begin_read();
+        let pending_timestamp = timestamp.map(|timestamp| self.begin_timestamp_read(timestamp));
         Ok(PendingReadback {
             submission,
             rgb: rgb_readback,
@@ -481,6 +559,7 @@ impl WgpuRenderer {
             rgb_mapping,
             depth_mapping,
             instance_mapping,
+            timestamp: pending_timestamp,
         })
     }
 
@@ -527,16 +606,43 @@ impl WgpuRenderer {
         }
     }
 
-    fn encode_scene_pass(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        targets: &TargetViews<'_>,
-        clear: [f32; 4],
-        bindings: Option<&SceneBindings>,
-        draw_calls: &[DrawCall<'_>],
-        shadow: Option<&ShadowResources>,
-    ) {
-        if let (Some(bindings), Some(shadow)) = (bindings, shadow) {
+    fn create_timestamp_resources(&self) -> Option<TimestampResources> {
+        self.timestamp_queries.then(|| TimestampResources {
+            query_set: self.device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("bpp render timestamps"),
+                ty: wgpu::QueryType::Timestamp,
+                count: 2,
+            }),
+            resolve: self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("bpp timestamp resolve"),
+                size: 16,
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }),
+            readback: self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("bpp timestamp readback"),
+                size: 16,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            }),
+        })
+    }
+
+    fn begin_timestamp_read(&self, timestamp: TimestampResources) -> PendingTimestamp {
+        let slice = timestamp.readback.slice(..);
+        let (sender, mapping) = mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        PendingTimestamp {
+            buffer: timestamp.readback,
+            mapping,
+            period_ns: self.timestamp_period_ns,
+        }
+    }
+
+    fn encode_scene_pass(&self, encoder: &mut wgpu::CommandEncoder, inputs: &ScenePassInputs<'_>) {
+        if let (Some(bindings), Some(shadow)) = (inputs.bindings, inputs.shadow) {
             let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("bpp directional shadow pass"),
                 color_attachments: &[],
@@ -555,47 +661,60 @@ impl WgpuRenderer {
             shadow_pass.set_pipeline(&self.shadow_pipeline);
             shadow_pass.set_bind_group(0, &bindings.camera, &[]);
             shadow_pass.set_bind_group(1, &bindings.draws, &[]);
-            encode_draw_calls(&mut shadow_pass, draw_calls);
+            encode_draw_calls(&mut shadow_pass, inputs.draw_calls);
         }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("bpp scene pass"),
             color_attachments: &[
                 Some(color_attachment(
-                    targets.rgb,
+                    inputs.targets.rgb,
                     wgpu::Color {
-                        r: f64::from(clear[0]),
-                        g: f64::from(clear[1]),
-                        b: f64::from(clear[2]),
-                        a: f64::from(clear[3]),
+                        r: f64::from(inputs.clear[0]),
+                        g: f64::from(inputs.clear[1]),
+                        b: f64::from(inputs.clear[2]),
+                        a: f64::from(inputs.clear[3]),
                     },
                 )),
-                Some(color_attachment(targets.depth, wgpu::Color::TRANSPARENT)),
-                Some(color_attachment(targets.instance, wgpu::Color::TRANSPARENT)),
+                Some(color_attachment(
+                    inputs.targets.depth,
+                    wgpu::Color::TRANSPARENT,
+                )),
+                Some(color_attachment(
+                    inputs.targets.instance,
+                    wgpu::Color::TRANSPARENT,
+                )),
             ],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: targets.depth_test,
+                view: inputs.targets.depth_test,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Clear(1.0),
                     store: wgpu::StoreOp::Discard,
                 }),
                 stencil_ops: None,
             }),
-            timestamp_writes: None,
+            timestamp_writes: inputs.timestamp_query_set.map(|query_set| {
+                wgpu::RenderPassTimestampWrites {
+                    query_set,
+                    beginning_of_pass_write_index: Some(0),
+                    end_of_pass_write_index: Some(1),
+                }
+            }),
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        if let Some(bindings) = bindings {
+        if let Some(bindings) = inputs.bindings {
             pass.set_pipeline(&self.render_pipeline);
             pass.set_bind_group(0, &bindings.camera, &[]);
             pass.set_bind_group(1, &bindings.draws, &[]);
             pass.set_bind_group(
                 2,
-                &shadow
+                &inputs
+                    .shadow
                     .expect("bindings require shadow resources")
                     .bind_group,
                 &[],
             );
-            encode_draw_calls(&mut pass, draw_calls);
+            encode_draw_calls(&mut pass, inputs.draw_calls);
         }
     }
 
@@ -647,12 +766,61 @@ impl WgpuRenderer {
         }
     }
 
+    #[allow(clippy::cast_precision_loss)]
+    fn encode_fxaa_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &wgpu::TextureView,
+        target: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+    ) {
+        let dimensions = [width as f32, height as f32, 0.0, 0.0];
+        let dimensions_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("bpp FXAA dimensions"),
+                contents: bytemuck::cast_slice(&dimensions),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bpp FXAA bind group"),
+            layout: &self.fxaa_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.fxaa_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: dimensions_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("bpp RGB FXAA pass"),
+            color_attachments: &[Some(color_attachment(target, wgpu::Color::TRANSPARENT))],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.fxaa_pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
     fn begin_camera(
         &self,
         camera: &CameraSnapshot,
         scene: &SceneSnapshot,
         appearance: &AppearanceSnapshot,
     ) -> Result<PendingReadback, WgpuSceneError> {
+        self.ensure_device_alive()?;
         let prepared = self.prepared.as_ref().ok_or(WgpuSceneError::NotPrepared)?;
         let mut uniforms = Vec::new();
         let mut calls = Vec::new();
@@ -726,6 +894,23 @@ impl WgpuRenderer {
             .finish(&self.device)
             .map_err(WgpuSceneError::Readback)
     }
+
+    fn ensure_device_alive(&self) -> Result<(), WgpuSceneError> {
+        let message = self
+            .device_loss
+            .lock()
+            .map_err(|_| WgpuSceneError::DeviceLossStatePoisoned)?
+            .clone();
+        message.map_or(Ok(()), |message| {
+            Err(WgpuSceneError::DeviceLost { message })
+        })
+    }
+}
+
+fn record_device_loss(state: &Mutex<Option<String>>, message: String) {
+    if let Ok(mut recorded) = state.lock() {
+        *recorded = Some(message);
+    }
 }
 
 impl PendingReadback {
@@ -748,11 +933,55 @@ impl PendingReadback {
                 u16::try_from(value).map_err(|_| WgpuReadbackError::InstanceIdOverflow { value })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let gpu_seconds = self.timestamp.map(PendingTimestamp::finish).transpose()?;
         Ok(ReadbackFrame {
             rgba8,
             depth,
             instance,
+            gpu_seconds,
         })
+    }
+}
+
+impl PendingTimestamp {
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    fn finish(self) -> Result<f32, WgpuReadbackError> {
+        receive_mapping(&self.mapping).map_err(map_mapping_completion)?;
+        let mapped = self.buffer.slice(..).get_mapped_range()?;
+        let timestamps: &[u64] = bytemuck::cast_slice(&mapped);
+        let ticks = timestamps[1].saturating_sub(timestamps[0]);
+        let seconds = (ticks as f64 * f64::from(self.period_ns) * 1.0e-9) as f32;
+        drop(mapped);
+        self.buffer.unmap();
+        if seconds.is_finite() {
+            Ok(seconds)
+        } else {
+            Err(WgpuReadbackError::TimestampOverflow)
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum MappingCompletionError<E> {
+    CallbackDropped,
+    Mapping(E),
+}
+
+fn receive_mapping<E>(
+    receiver: &mpsc::Receiver<Result<(), E>>,
+) -> Result<(), MappingCompletionError<E>> {
+    receiver
+        .recv()
+        .map_err(|_| MappingCompletionError::CallbackDropped)?
+        .map_err(MappingCompletionError::Mapping)
+}
+
+fn map_mapping_completion(
+    error: MappingCompletionError<wgpu::BufferAsyncError>,
+) -> WgpuReadbackError {
+    match error {
+        MappingCompletionError::CallbackDropped => WgpuReadbackError::CallbackDropped,
+        MappingCompletionError::Mapping(error) => WgpuReadbackError::Map(error),
     }
 }
 
@@ -910,6 +1139,10 @@ enum WgpuSceneError {
     ImageDimensionPrecision { value: u32 },
     #[error("appearance exceeds the supported limit of {maximum} directional or point lights")]
     TooManyLights { maximum: usize },
+    #[error("wgpu device was lost: {message}")]
+    DeviceLost { message: String },
+    #[error("wgpu device-loss state lock was poisoned")]
+    DeviceLossStatePoisoned,
     #[error(transparent)]
     Readback(#[from] WgpuReadbackError),
 }
@@ -973,6 +1206,17 @@ impl Renderer for WgpuRenderer {
             rendered.push((camera, frame));
         }
         let render_seconds = checked_duration(render_started.elapsed())?;
+        let gpu_seconds = rendered
+            .iter()
+            .try_fold(0.0_f32, |total, (_, frame)| {
+                frame.gpu_seconds.map(|seconds| total + seconds)
+            })
+            .map(|seconds| {
+                NonNegativeFinite::try_new(seconds).map_err(|error| RenderError::Internal {
+                    message: format!("invalid accumulated GPU timestamp: {error}"),
+                })
+            })
+            .transpose()?;
         let encode_started = Instant::now();
         for (camera, frame) in rendered {
             staging
@@ -1015,7 +1259,8 @@ impl Renderer for WgpuRenderer {
             self.info.clone(),
             camera_count,
             request.required_channels(),
-            RenderStageTimings::new(zero, render_seconds, zero, encode_seconds),
+            RenderStageTimings::new(zero, render_seconds, zero, encode_seconds)
+                .with_gpu_seconds(gpu_seconds),
             0,
         ))
     }
@@ -1142,9 +1387,7 @@ impl ReadbackBuffer {
         receiver: &mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
     ) -> Result<Vec<u8>, WgpuReadbackError> {
         let slice = self.buffer.slice(..);
-        receiver
-            .recv()
-            .map_err(|_| WgpuReadbackError::CallbackDropped)??;
+        receive_mapping(receiver).map_err(map_mapping_completion)?;
         let mapped = slice.get_mapped_range()?;
         let capacity = usize::try_from(self.unpadded_bytes_per_row)
             .ok()
@@ -1183,6 +1426,8 @@ enum WgpuReadbackError {
     CallbackDropped,
     #[error("GPU instance target returned ID {value} outside the canonical u16 domain")]
     InstanceIdOverflow { value: u32 },
+    #[error("GPU timestamp duration exceeded the finite f32 report domain")]
+    TimestampOverflow,
 }
 
 fn create_target(
@@ -1199,6 +1444,24 @@ fn create_target(
         dimension: wgpu::TextureDimension::D2,
         format,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    })
+}
+
+fn create_sampled_target(
+    device: &wgpu::Device,
+    size: wgpu::Extent3d,
+    format: wgpu::TextureFormat,
+    label: &str,
+) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     })
 }
@@ -1417,6 +1680,72 @@ fn create_shadow_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayo
     })
 }
 
+fn create_fxaa_pipeline(device: &wgpu::Device) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("bpp FXAA layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("bpp FXAA pipeline layout"),
+        bind_group_layouts: &[Some(&bind_group_layout)],
+        immediate_size: 0,
+    });
+    let shader = device.create_shader_module(wgpu::include_wgsl!("fxaa.wgsl"));
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("bpp RGB FXAA pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+    (pipeline, bind_group_layout)
+}
+
 fn srgb_to_linear(value: f32) -> f32 {
     if value <= 0.040_45 {
         value / 12.92
@@ -1631,6 +1960,7 @@ fn validate_buffer_size(
 fn backend_info(
     adapter: &wgpu::AdapterInfo,
     limits: &wgpu::Limits,
+    timestamp_queries: bool,
 ) -> Result<BackendInfo, InvalidBackendInfoError> {
     let mut properties = BTreeMap::from([
         ("backend".to_owned(), format!("{:?}", adapter.backend)),
@@ -1644,6 +1974,10 @@ fn backend_info(
             limits.max_texture_dimension_2d.to_string(),
         ),
         ("vendor_id".to_owned(), adapter.vendor.to_string()),
+        (
+            "timestamp_queries".to_owned(),
+            timestamp_queries.to_string(),
+        ),
     ]);
     if !adapter.driver.trim().is_empty() {
         properties.insert("driver".to_owned(), adapter.driver.clone());
@@ -1672,7 +2006,10 @@ mod tests {
         AssetId, RenderSceneRequest, Renderer, WgpuAdapterPreference, WgpuDevicePreference,
     };
 
-    use super::{adapter_rank, directional_shadow_matrix, pack_vertices};
+    use super::{
+        MappingCompletionError, adapter_rank, directional_shadow_matrix, pack_vertices,
+        receive_mapping,
+    };
 
     fn project_opencv_point_to_clip(
         point: [f32; 3],
@@ -1759,6 +2096,23 @@ mod tests {
                 wgpu::DeviceType::Cpu,
             ),
             None
+        );
+    }
+
+    #[test]
+    fn mapping_failures_and_dropped_callbacks_remain_distinct() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        sender.send(Err("injected map failure")).unwrap();
+        assert_eq!(
+            receive_mapping(&receiver),
+            Err(MappingCompletionError::Mapping("injected map failure"))
+        );
+
+        let (sender, receiver) = std::sync::mpsc::channel::<Result<(), &str>>();
+        drop(sender);
+        assert_eq!(
+            receive_mapping(&receiver),
+            Err(MappingCompletionError::CallbackDropped)
         );
     }
 
@@ -1888,7 +2242,7 @@ mod tests {
             WgpuDevicePreference::Automatic,
             WgpuAdapterPreference::HighPerformance,
             16,
-            false,
+            true,
         )
         .unwrap();
         let renderer = super::WgpuRenderer::try_new(config).unwrap();
@@ -1918,7 +2272,7 @@ mod tests {
             WgpuDevicePreference::Automatic,
             WgpuAdapterPreference::HighPerformance,
             16,
-            false,
+            true,
         )
         .unwrap();
         let mut renderer = super::WgpuRenderer::try_new(config).unwrap();
@@ -1991,13 +2345,33 @@ mod tests {
             )
             .unwrap();
         }
-        Renderer::render_scene(&mut renderer, &request, &staging).unwrap();
+        let report = Renderer::render_scene(&mut renderer, &request, &staging).unwrap();
+        let timestamps_supported = report.backend().properties()["timestamp_queries"] == "true";
+        assert_eq!(
+            report.timings().gpu_seconds().is_some(),
+            timestamps_supported
+        );
+        if let Some(gpu_seconds) = report.timings().gpu_seconds() {
+            assert!(gpu_seconds.get() > 0.0);
+            assert!(gpu_seconds.get() <= report.timings().render_seconds().get());
+        }
         bpp_dataset::validate_and_write_checksums(&staging, &request).unwrap();
         assert!(staging.root().join("checksums.json").is_file());
         for camera in request.cameras() {
             assert!(staging.rgb_path(camera.camera_id()).is_file());
             assert!(staging.depth_path(camera.camera_id()).is_file());
             assert!(staging.instance_path(camera.camera_id()).is_file());
+        }
+
+        let failed_staging =
+            bpp_dataset::SceneStagingArea::create(root.path(), request.scene().scene_id()).unwrap();
+        super::record_device_loss(&renderer.device_loss, "injected test loss".to_owned());
+        let error = Renderer::render_scene(&mut renderer, &request, &failed_staging).unwrap_err();
+        assert!(error.to_string().contains("injected test loss"));
+        for camera in request.cameras() {
+            assert!(!failed_staging.rgb_path(camera.camera_id()).exists());
+            assert!(!failed_staging.depth_path(camera.camera_id()).exists());
+            assert!(!failed_staging.instance_path(camera.camera_id()).exists());
         }
     }
 }

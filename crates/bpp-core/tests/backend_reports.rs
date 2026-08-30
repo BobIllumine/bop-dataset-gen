@@ -43,6 +43,26 @@ fn timings() -> RenderStageTimings {
 }
 
 #[test]
+fn gpu_time_is_optional_and_distinct_from_wall_clock_stages() {
+    let without_gpu = timings();
+    assert_eq!(without_gpu.gpu_seconds(), None);
+    assert!(
+        !serde_json::to_string(&without_gpu)
+            .unwrap()
+            .contains("gpu_seconds")
+    );
+
+    let with_gpu = without_gpu.with_gpu_seconds(Some(nonnegative(0.75)));
+    assert_eq!(with_gpu.gpu_seconds(), Some(nonnegative(0.75)));
+    let json = serde_json::to_string(&with_gpu).unwrap();
+    assert!(json.contains(r#""gpu_seconds":0.75"#));
+    assert_eq!(
+        serde_json::from_str::<RenderStageTimings>(&json).unwrap(),
+        with_gpu
+    );
+}
+
+#[test]
 fn backend_kind_uses_exact_snake_case_wire_values() {
     let cases = [
         (BackendKind::Wgpu, r#""wgpu""#),

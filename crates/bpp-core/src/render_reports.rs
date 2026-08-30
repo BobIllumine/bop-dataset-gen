@@ -259,6 +259,8 @@ pub struct RenderStageTimings {
     render_seconds: NonNegativeFinite,
     readback_seconds: NonNegativeFinite,
     encode_seconds: NonNegativeFinite,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gpu_seconds: Option<NonNegativeFinite>,
 }
 
 #[derive(Deserialize)]
@@ -270,6 +272,8 @@ struct RenderStageTimingsWire {
     render_seconds: NonNegativeFinite,
     readback_seconds: NonNegativeFinite,
     encode_seconds: NonNegativeFinite,
+    #[serde(default)]
+    gpu_seconds: Option<NonNegativeFinite>,
 }
 
 impl<'de> Deserialize<'de> for RenderStageTimings {
@@ -283,7 +287,8 @@ impl<'de> Deserialize<'de> for RenderStageTimings {
             wire.render_seconds,
             wire.readback_seconds,
             wire.encode_seconds,
-        ))
+        )
+        .with_gpu_seconds(wire.gpu_seconds))
     }
 }
 
@@ -302,7 +307,15 @@ impl RenderStageTimings {
             render_seconds,
             readback_seconds,
             encode_seconds,
+            gpu_seconds: None,
         }
+    }
+
+    /// Attaches an optional device-timestamp measurement to the wall-clock stages.
+    #[must_use]
+    pub const fn with_gpu_seconds(mut self, gpu_seconds: Option<NonNegativeFinite>) -> Self {
+        self.gpu_seconds = gpu_seconds;
+        self
     }
 
     /// Returns the wire-schema version.
@@ -333,6 +346,12 @@ impl RenderStageTimings {
     #[must_use]
     pub const fn encode_seconds(self) -> NonNegativeFinite {
         self.encode_seconds
+    }
+
+    /// Returns GPU execution time when timestamp queries were supported.
+    #[must_use]
+    pub const fn gpu_seconds(self) -> Option<NonNegativeFinite> {
+        self.gpu_seconds
     }
 
     /// Sums all stage durations, returning `None` on finite-`f32` overflow.
