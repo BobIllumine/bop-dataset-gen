@@ -1,6 +1,10 @@
 //! Command-line entry point for BPP dataset generation.
 
-use std::process::ExitCode;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    process::ExitCode,
+};
 
 #[cfg(feature = "blenderproc")]
 use bpp_core::Renderer as _;
@@ -10,17 +14,276 @@ fn main() -> ExitCode {
 }
 
 fn run(arguments: impl IntoIterator<Item = String>) -> ExitCode {
-    let arguments: Vec<_> = arguments.into_iter().collect();
-    match arguments.as_slice() {
-        [command] if command == "doctor" => doctor("wgpu"),
-        [command, flag, renderer] if command == "doctor" && flag == "--renderer" => {
-            doctor(renderer)
-        }
-        _ => {
-            eprintln!("usage: bpp doctor [--renderer wgpu|blenderproc]");
+    match parse(arguments) {
+        Ok(command) => execute(command),
+        Err(message) => {
+            eprintln!("{message}\n{USAGE}");
             ExitCode::from(2)
         }
     }
+}
+
+const USAGE: &str = "usage: bpp doctor [--renderer wgpu|blenderproc|all]\n       bpp schema\n       bpp prepare-assets --config FILE\n       bpp simulate --config FILE --output CORPUS\n       bpp render --config FILE --snapshots CORPUS --renderer BACKEND --output DATASET\n       bpp generate --config FILE --renderer BACKEND --output DATASET [--resume]\n       bpp validate DATASET\n       bpp export bop DATASET --output DIRECTORY\n       bpp bench --config FILE --renderers BACKEND[,BACKEND] --output DIRECTORY";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RendererSelection {
+    Wgpu,
+    BlenderProc,
+    All,
+}
+
+impl RendererSelection {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "wgpu" => Ok(Self::Wgpu),
+            "blenderproc" => Ok(Self::BlenderProc),
+            "all" => Ok(Self::All),
+            _ => Err(format!("unknown renderer {value:?}")),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Command {
+    Doctor {
+        renderer: Option<RendererSelection>,
+    },
+    Schema,
+    PrepareAssets {
+        config: PathBuf,
+    },
+    Simulate {
+        config: PathBuf,
+        output: PathBuf,
+    },
+    Render {
+        config: PathBuf,
+        snapshots: PathBuf,
+        renderer: RendererSelection,
+        output: PathBuf,
+    },
+    Generate {
+        config: PathBuf,
+        renderer: RendererSelection,
+        output: PathBuf,
+        resume: bool,
+    },
+    Validate {
+        dataset: PathBuf,
+    },
+    ExportBop {
+        dataset: PathBuf,
+        output: PathBuf,
+    },
+    Bench {
+        config: PathBuf,
+        renderers: Vec<RendererSelection>,
+        output: PathBuf,
+    },
+}
+
+fn parse(arguments: impl IntoIterator<Item = impl Into<String>>) -> Result<Command, String> {
+    let mut arguments = arguments.into_iter().map(Into::into);
+    let command = arguments
+        .next()
+        .ok_or_else(|| "missing subcommand".to_owned())?;
+    let rest = arguments.collect::<Vec<_>>();
+    match command.as_str() {
+        "doctor" => {
+            let options = parse_options(&rest, &["--renderer"], &[])?;
+            ensure_no_flags(&options.flags)?;
+            let renderer = options
+                .values
+                .get("--renderer")
+                .map(|value| RendererSelection::parse(value))
+                .transpose()?;
+            Ok(Command::Doctor { renderer })
+        }
+        "schema" if rest.is_empty() => Ok(Command::Schema),
+        "prepare-assets" => {
+            let options = parse_options(&rest, &["--config"], &[])?;
+            ensure_no_flags(&options.flags)?;
+            Ok(Command::PrepareAssets {
+                config: required_path(&options.values, "--config")?,
+            })
+        }
+        "simulate" => {
+            let options = parse_options(&rest, &["--config", "--output"], &[])?;
+            ensure_no_flags(&options.flags)?;
+            Ok(Command::Simulate {
+                config: required_path(&options.values, "--config")?,
+                output: required_path(&options.values, "--output")?,
+            })
+        }
+        "render" => {
+            let options = parse_options(
+                &rest,
+                &["--config", "--snapshots", "--renderer", "--output"],
+                &[],
+            )?;
+            ensure_no_flags(&options.flags)?;
+            Ok(Command::Render {
+                config: required_path(&options.values, "--config")?,
+                snapshots: required_path(&options.values, "--snapshots")?,
+                renderer: one_renderer(required(&options.values, "--renderer")?)?,
+                output: required_path(&options.values, "--output")?,
+            })
+        }
+        "generate" => {
+            let options = parse_options(
+                &rest,
+                &["--config", "--renderer", "--output"],
+                &["--resume"],
+            )?;
+            Ok(Command::Generate {
+                config: required_path(&options.values, "--config")?,
+                renderer: one_renderer(required(&options.values, "--renderer")?)?,
+                output: required_path(&options.values, "--output")?,
+                resume: options.flags.contains("--resume"),
+            })
+        }
+        "validate" if rest.len() == 1 => Ok(Command::Validate {
+            dataset: PathBuf::from(&rest[0]),
+        }),
+        "export" if rest.first().map(String::as_str) == Some("bop") => {
+            let dataset = rest
+                .get(1)
+                .filter(|value| !value.starts_with('-'))
+                .ok_or_else(|| "export bop requires DATASET".to_owned())?;
+            let options = parse_options(&rest[2..], &["--output"], &[])?;
+            ensure_no_flags(&options.flags)?;
+            Ok(Command::ExportBop {
+                dataset: PathBuf::from(dataset),
+                output: required_path(&options.values, "--output")?,
+            })
+        }
+        "bench" => {
+            let options = parse_options(&rest, &["--config", "--renderers", "--output"], &[])?;
+            ensure_no_flags(&options.flags)?;
+            let renderers = required(&options.values, "--renderers")?
+                .split(',')
+                .map(one_renderer)
+                .collect::<Result<Vec<_>, _>>()?;
+            if renderers.is_empty() {
+                return Err("--renderers must not be empty".to_owned());
+            }
+            Ok(Command::Bench {
+                config: required_path(&options.values, "--config")?,
+                renderers,
+                output: required_path(&options.values, "--output")?,
+            })
+        }
+        _ => Err(format!("unknown or malformed subcommand {command:?}")),
+    }
+}
+
+struct ParsedOptions {
+    values: BTreeMap<String, String>,
+    flags: BTreeSet<String>,
+}
+
+fn parse_options(
+    arguments: &[String],
+    value_options: &[&str],
+    boolean_flags: &[&str],
+) -> Result<ParsedOptions, String> {
+    let mut options = BTreeMap::new();
+    let mut flags = BTreeSet::new();
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = arguments[index].as_str();
+        if boolean_flags.contains(&argument) {
+            if !flags.insert(argument.to_owned()) {
+                return Err(format!("duplicate flag {argument}"));
+            }
+            index += 1;
+        } else if value_options.contains(&argument) {
+            let value = arguments
+                .get(index + 1)
+                .filter(|value| !value.starts_with('-'))
+                .ok_or_else(|| format!("{argument} requires a value"))?;
+            if options.insert(argument.to_owned(), value.clone()).is_some() {
+                return Err(format!("duplicate option {argument}"));
+            }
+            index += 2;
+        } else {
+            return Err(format!("unexpected argument {argument:?}"));
+        }
+    }
+    Ok(ParsedOptions {
+        values: options,
+        flags,
+    })
+}
+
+fn required<'a>(options: &'a BTreeMap<String, String>, name: &str) -> Result<&'a str, String> {
+    options
+        .get(name)
+        .map(String::as_str)
+        .ok_or_else(|| format!("missing required option {name}"))
+}
+
+fn required_path(options: &BTreeMap<String, String>, name: &str) -> Result<PathBuf, String> {
+    required(options, name).map(PathBuf::from)
+}
+
+fn ensure_no_flags(flags: &BTreeSet<String>) -> Result<(), String> {
+    if flags.is_empty() {
+        Ok(())
+    } else {
+        Err("unexpected boolean flag".to_owned())
+    }
+}
+
+fn one_renderer(value: &str) -> Result<RendererSelection, String> {
+    match RendererSelection::parse(value)? {
+        RendererSelection::All => Err("renderer 'all' is only valid for doctor".to_owned()),
+        renderer => Ok(renderer),
+    }
+}
+
+fn execute(command: Command) -> ExitCode {
+    match command {
+        Command::Doctor {
+            renderer: None | Some(RendererSelection::All),
+        } => {
+            let wgpu = doctor("wgpu");
+            let blenderproc = doctor("blenderproc");
+            if wgpu == ExitCode::SUCCESS && blenderproc == ExitCode::SUCCESS {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(3)
+            }
+        }
+        Command::Doctor {
+            renderer: Some(RendererSelection::Wgpu),
+        } => doctor("wgpu"),
+        Command::Doctor {
+            renderer: Some(RendererSelection::BlenderProc),
+        } => doctor("blenderproc"),
+        Command::Schema => {
+            println!("{}", bpp_core::run_config_json_schema());
+            ExitCode::SUCCESS
+        }
+        other => unavailable_command(&other),
+    }
+}
+
+fn unavailable_command(command: &Command) -> ExitCode {
+    eprintln!(
+        "subcommand {} is recognized but its runtime is not available yet",
+        match command {
+            Command::PrepareAssets { .. } => "prepare-assets",
+            Command::Simulate { .. } => "simulate",
+            Command::Render { .. } => "render",
+            Command::Generate { .. } => "generate",
+            Command::Validate { .. } => "validate",
+            Command::ExportBop { .. } => "export bop",
+            Command::Bench { .. } => "bench",
+            Command::Doctor { .. } | Command::Schema => unreachable!("implemented command"),
+        }
+    );
+    ExitCode::from(3)
 }
 
 fn doctor(renderer: &str) -> ExitCode {
@@ -109,7 +372,133 @@ fn doctor_blenderproc() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::run;
+    use std::path::PathBuf;
+
+    use super::{Command, RendererSelection, parse, run};
+
+    #[test]
+    fn every_documented_subcommand_has_one_unambiguous_parse_shape() {
+        assert_eq!(parse(["doctor"]), Ok(Command::Doctor { renderer: None }));
+        assert_eq!(
+            parse(["doctor", "--renderer", "all"]),
+            Ok(Command::Doctor {
+                renderer: Some(RendererSelection::All)
+            })
+        );
+        assert_eq!(parse(["schema"]), Ok(Command::Schema));
+        assert_eq!(
+            parse(["prepare-assets", "--config", "run.toml"]),
+            Ok(Command::PrepareAssets {
+                config: PathBuf::from("run.toml")
+            })
+        );
+        assert_eq!(
+            parse(["simulate", "--config", "run.toml", "--output", "corpus"]),
+            Ok(Command::Simulate {
+                config: PathBuf::from("run.toml"),
+                output: PathBuf::from("corpus")
+            })
+        );
+        assert_eq!(
+            parse([
+                "render",
+                "--config",
+                "run.toml",
+                "--snapshots",
+                "corpus",
+                "--renderer",
+                "wgpu",
+                "--output",
+                "dataset"
+            ]),
+            Ok(Command::Render {
+                config: PathBuf::from("run.toml"),
+                snapshots: PathBuf::from("corpus"),
+                renderer: RendererSelection::Wgpu,
+                output: PathBuf::from("dataset")
+            })
+        );
+        assert_eq!(
+            parse([
+                "generate",
+                "--config",
+                "run.toml",
+                "--renderer",
+                "blenderproc",
+                "--output",
+                "dataset",
+                "--resume"
+            ]),
+            Ok(Command::Generate {
+                config: PathBuf::from("run.toml"),
+                renderer: RendererSelection::BlenderProc,
+                output: PathBuf::from("dataset"),
+                resume: true
+            })
+        );
+        assert_eq!(
+            parse(["validate", "dataset"]),
+            Ok(Command::Validate {
+                dataset: PathBuf::from("dataset")
+            })
+        );
+        assert_eq!(
+            parse(["export", "bop", "dataset", "--output", "bop-out"]),
+            Ok(Command::ExportBop {
+                dataset: PathBuf::from("dataset"),
+                output: PathBuf::from("bop-out")
+            })
+        );
+        assert_eq!(
+            parse([
+                "bench",
+                "--config",
+                "run.toml",
+                "--renderers",
+                "wgpu,blenderproc",
+                "--output",
+                "reports"
+            ]),
+            Ok(Command::Bench {
+                config: PathBuf::from("run.toml"),
+                renderers: vec![RendererSelection::Wgpu, RendererSelection::BlenderProc],
+                output: PathBuf::from("reports")
+            })
+        );
+    }
+
+    #[test]
+    fn parser_rejects_missing_duplicate_unknown_and_ambiguous_options() {
+        for arguments in [
+            vec!["simulate", "--config", "run.toml"],
+            vec![
+                "generate",
+                "--config",
+                "a.toml",
+                "--config",
+                "b.toml",
+                "--renderer",
+                "wgpu",
+                "--output",
+                "out",
+            ],
+            vec![
+                "render",
+                "--config",
+                "run.toml",
+                "--snapshots",
+                "corpus",
+                "--renderer",
+                "all",
+                "--output",
+                "out",
+            ],
+            vec!["validate", "one", "two"],
+            vec!["schema", "--output", "schema.json"],
+        ] {
+            assert!(parse(arguments).is_err());
+        }
+    }
 
     #[test]
     fn invalid_doctor_invocations_use_the_usage_exit_code() {
@@ -121,14 +510,14 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_renderer_uses_the_capability_exit_code() {
+    fn invalid_renderer_is_usage_and_uncompiled_renderer_is_capability_failure() {
         assert_eq!(
             run([
                 "doctor".to_owned(),
                 "--renderer".to_owned(),
                 "unknown".to_owned()
             ]),
-            std::process::ExitCode::from(3)
+            std::process::ExitCode::from(2)
         );
         assert_eq!(
             run([
