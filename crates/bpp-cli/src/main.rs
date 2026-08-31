@@ -266,36 +266,17 @@ fn execute(command: Command) -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::PrepareAssets { config } => prepare_assets(&config),
+        Command::Simulate { config, output } => simulate(&config, &output),
         other => unavailable_command(&other),
     }
 }
 
 fn prepare_assets(config_path: &std::path::Path) -> ExitCode {
-    let bytes = match std::fs::read(config_path) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            eprintln!("cannot read config {}: {error}", config_path.display());
-            return ExitCode::from(2);
-        }
+    let loaded = match load_run(config_path) {
+        Ok(loaded) => loaded,
+        Err(error) => return configuration_error(&error),
     };
-    let text = match std::str::from_utf8(&bytes) {
-        Ok(text) => text,
-        Err(error) => {
-            eprintln!("config {} is not UTF-8: {error}", config_path.display());
-            return ExitCode::from(2);
-        }
-    };
-    let config = match bpp_core::RunConfig::from_toml(text) {
-        Ok(config) => config,
-        Err(error) => {
-            eprintln!("invalid config {}: {error}", config_path.display());
-            return ExitCode::from(2);
-        }
-    };
-    let directory = config_path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
-    match bpp_pipeline::prepare_asset_catalog(config.plan(), directory) {
+    match bpp_pipeline::prepare_asset_catalog(loaded.config.plan(), &loaded.directory) {
         Ok(prepared) => {
             println!(
                 "{}",
@@ -309,6 +290,80 @@ fn prepare_assets(config_path: &std::path::Path) -> ExitCode {
         Err(error) => {
             eprintln!("asset preparation failed: {error}");
             ExitCode::from(2)
+        }
+    }
+}
+
+struct LoadedRun {
+    bytes: Vec<u8>,
+    config: bpp_core::RunConfig,
+    directory: PathBuf,
+}
+
+fn load_run(config_path: &std::path::Path) -> Result<LoadedRun, String> {
+    let bytes = std::fs::read(config_path)
+        .map_err(|error| format!("cannot read config {}: {error}", config_path.display()))?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|error| format!("config {} is not UTF-8: {error}", config_path.display()))?;
+    let config = bpp_core::RunConfig::from_toml(text)
+        .map_err(|error| format!("invalid config {}: {error}", config_path.display()))?;
+    let directory = config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .to_owned();
+    Ok(LoadedRun {
+        bytes,
+        config,
+        directory,
+    })
+}
+
+fn configuration_error(message: &str) -> ExitCode {
+    eprintln!("{message}");
+    ExitCode::from(2)
+}
+
+fn simulate(config_path: &std::path::Path, output: &std::path::Path) -> ExitCode {
+    let loaded = match load_run(config_path) {
+        Ok(loaded) => loaded,
+        Err(error) => return configuration_error(&error),
+    };
+    let prepared =
+        match bpp_pipeline::prepare_asset_catalog(loaded.config.plan(), &loaded.directory) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return configuration_error(&format!("asset preparation failed: {error}"));
+            }
+        };
+    let simulator = match bpp_pipeline::SerialSnapshotSimulator::try_new(
+        loaded.config.plan(),
+        prepared.shared_physics_assets(),
+    ) {
+        Ok(simulator) => simulator,
+        Err(error) => return configuration_error(&format!("simulation setup failed: {error}")),
+    };
+    let cancellation = bpp_pipeline::CancellationToken::new();
+    match simulator.run(
+        &loaded.bytes,
+        prepared.visual_assets().fingerprint(),
+        output,
+        &cancellation,
+    ) {
+        Ok(report) => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "preexisting_scenes": report.preexisting_scene_count(),
+                    "generated_scenes": report.generated_scene_count(),
+                    "total_scenes": report.total_scene_count(),
+                    "cancelled": report.was_cancelled(),
+                })
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("simulation did not produce the requested corpus: {error}");
+            ExitCode::from(4)
         }
     }
 }
@@ -585,6 +640,24 @@ mod tests {
                 "prepare-assets".to_owned(),
                 "--config".to_owned(),
                 missing.display().to_string(),
+            ]),
+            std::process::ExitCode::from(2)
+        );
+    }
+
+    #[test]
+    fn simulate_reports_missing_config_as_configuration_failure() {
+        let missing = std::env::temp_dir().join(format!(
+            "bpp-missing-simulation-config-{}.toml",
+            std::process::id()
+        ));
+        assert_eq!(
+            run([
+                "simulate".to_owned(),
+                "--config".to_owned(),
+                missing.display().to_string(),
+                "--output".to_owned(),
+                "unused-corpus".to_owned(),
             ]),
             std::process::ExitCode::from(2)
         );
