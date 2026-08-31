@@ -750,7 +750,7 @@ fn doctor_blenderproc() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{fs, path::PathBuf};
 
     use super::{Command, RendererSelection, parse, run};
 
@@ -989,5 +989,51 @@ mod tests {
             super::resolve_executable_path(base, std::path::Path::new("tools/blenderproc")),
             PathBuf::from("/project/config/tools/blenderproc")
         );
+    }
+
+    #[cfg(feature = "wgpu")]
+    #[test]
+    #[ignore = "requires access to a host Metal or Vulkan adapter"]
+    fn real_wgpu_generate_cli_commits_a_complete_dataset() {
+        let root = tempfile::tempdir().expect("temporary CLI smoke root");
+        let source = root.path().join("cube.stl");
+        fs::write(
+            &source,
+            "solid tetrahedron\n\
+             facet normal 0 0 -1\nouter loop\nvertex -1 -1 0\nvertex 0 1 0\nvertex 1 -1 0\nendloop\nendfacet\n\
+             facet normal 0 -1 0\nouter loop\nvertex -1 -1 0\nvertex 1 -1 0\nvertex 0 0 1\nendloop\nendfacet\n\
+             facet normal 1 1 1\nouter loop\nvertex 1 -1 0\nvertex 0 1 0\nvertex 0 0 1\nendloop\nendfacet\n\
+             facet normal -1 1 1\nouter loop\nvertex 0 1 0\nvertex -1 -1 0\nvertex 0 0 1\nendloop\nendfacet\n\
+             endsolid tetrahedron\n",
+        )
+        .expect("write generated permissive STL");
+        let cache = root.path().join("cache");
+        let config = include_str!("../../bpp-pipeline/tests/fixtures/serial_run.toml")
+            .replace("source_path = \"cube.glb\"", "source_path = \"cube.stl\"")
+            .replace("source_unit_scale_m = 1.0", "source_unit_scale_m = 0.05")
+            .replace(
+                "cache_path = \"cache\"",
+                &format!("cache_path = \"{}\"", cache.display()),
+            );
+        let config_path = root.path().join("run.toml");
+        fs::write(&config_path, config).expect("write smoke config");
+        let dataset = root.path().join("dataset");
+
+        let exit = run([
+            "generate".to_owned(),
+            "--config".to_owned(),
+            config_path.display().to_string(),
+            "--renderer".to_owned(),
+            "wgpu".to_owned(),
+            "--output".to_owned(),
+            dataset.display().to_string(),
+        ]);
+
+        assert_eq!(exit, std::process::ExitCode::SUCCESS);
+        let frame = dataset.join("scenes/00000000000000000000/frames/00001");
+        for artifact in ["frame.json", "rgb.png", "depth.exr", "instance.png"] {
+            let path = frame.join(artifact);
+            assert!(path.metadata().is_ok_and(|metadata| metadata.len() > 0));
+        }
     }
 }

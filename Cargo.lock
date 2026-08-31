@@ -177,6 +177,7 @@ dependencies = [
  "bpp-render-blenderproc",
  "bpp-render-wgpu",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
