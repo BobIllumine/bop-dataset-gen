@@ -5,12 +5,274 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use bpp_core::{RenderSceneRequest, SceneId};
+use bpp_core::{CameraSnapshot, RenderSceneRequest, SceneId, SceneSnapshot};
 use exr::prelude::{ReadChannels as _, ReadLayers as _, ReadSpecificChannel as _, read};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::SceneStagingArea;
+
+/// Summary of a successful, read-only validation of a committed dataset.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DatasetValidationReport {
+    scene_count: u64,
+    file_count: u64,
+}
+
+impl DatasetValidationReport {
+    /// Returns the number of validated committed scenes.
+    #[must_use]
+    pub const fn scene_count(self) -> u64 {
+        self.scene_count
+    }
+
+    /// Returns the number of content files covered by stored checksums.
+    #[must_use]
+    pub const fn file_count(self) -> u64 {
+        self.file_count
+    }
+}
+
+/// Validates the immutable identity and checksums of a committed dataset.
+///
+/// This operation is read-only. It requires every scene in the manifest domain,
+/// rejects noncanonical scene directories, and verifies every checksum entry.
+///
+/// # Errors
+///
+/// Returns a path-specific error for malformed manifests, missing scenes,
+/// unsafe checksum paths, untracked files, or content whose BLAKE3 digest changed.
+pub fn validate_dataset(root: &Path) -> Result<DatasetValidationReport, DatasetValidationError> {
+    let manifest_path = root.join("run.json");
+    let manifest: crate::DatasetManifest = read_json(&manifest_path)?;
+    let config_path = root.join("resolved-config.toml");
+    let config = fs::read(&config_path).map_err(|source| io_error(&config_path, source))?;
+    if crate::resume::fingerprint_config(&config) != manifest.resolved_config_fingerprint() {
+        return Err(DatasetValidationError::ResolvedConfigFingerprint);
+    }
+
+    let scenes_root = root.join("scenes");
+    let entries = fs::read_dir(&scenes_root).map_err(|source| io_error(&scenes_root, source))?;
+    let mut seen = BTreeSet::new();
+    let mut file_count = 0_u64;
+    for entry in entries {
+        let entry = entry.map_err(|source| io_error(&scenes_root, source))?;
+        let path = entry.path();
+        if !entry
+            .file_type()
+            .map_err(|source| io_error(&path, source))?
+            .is_dir()
+        {
+            return Err(DatasetValidationError::InvalidScenePath { path });
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return Err(DatasetValidationError::InvalidScenePath { path });
+        };
+        let Ok(scene_id) = name.parse::<u64>() else {
+            return Err(DatasetValidationError::InvalidScenePath { path });
+        };
+        if name != format!("{scene_id:020}") || scene_id >= manifest.total_scene_count() {
+            return Err(DatasetValidationError::InvalidScenePath { path });
+        }
+        if !seen.insert(scene_id) {
+            return Err(DatasetValidationError::InvalidScenePath { path });
+        }
+        file_count = file_count
+            .checked_add(validate_committed_scene(&path, scene_id)?)
+            .ok_or(DatasetValidationError::CountOverflow)?;
+    }
+    if seen.len() as u64 != manifest.total_scene_count() {
+        return Err(DatasetValidationError::IncompleteDataset {
+            expected: manifest.total_scene_count(),
+            actual: seen.len() as u64,
+        });
+    }
+    Ok(DatasetValidationReport {
+        scene_count: manifest.total_scene_count(),
+        file_count,
+    })
+}
+
+fn validate_committed_scene(
+    root: &Path,
+    expected_scene_id: u64,
+) -> Result<u64, DatasetValidationError> {
+    let checksum_path = root.join("checksums.json");
+    let checksums: StoredChecksumManifest = read_json(&checksum_path)?;
+    if checksums.schema_version != 1 || checksums.scene_id != expected_scene_id {
+        return Err(DatasetValidationError::ChecksumManifestIdentity {
+            path: checksum_path,
+        });
+    }
+    let actual_files = collect_content_files(root)?;
+    let declared = checksums.files.keys().cloned().collect::<BTreeSet<_>>();
+    if actual_files != declared {
+        return Err(DatasetValidationError::FileSetMismatch {
+            path: root.to_owned(),
+        });
+    }
+    for (relative, expected) in &checksums.files {
+        let relative_path = Path::new(relative);
+        if relative_path.is_absolute()
+            || relative_path
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
+            return Err(DatasetValidationError::UnsafeChecksumPath {
+                path: relative_path.to_owned(),
+            });
+        }
+        let path = root.join(relative_path);
+        let bytes = fs::read(&path).map_err(|source| io_error(&path, source))?;
+        let actual = blake3::hash(&bytes).to_hex().to_string();
+        if &actual != expected {
+            return Err(DatasetValidationError::ChecksumMismatch { path });
+        }
+    }
+    validate_scene_content(root, expected_scene_id, &declared)?;
+    u64::try_from(checksums.files.len()).map_err(|_| DatasetValidationError::CountOverflow)
+}
+
+fn validate_scene_content(
+    root: &Path,
+    expected_scene_id: u64,
+    declared: &BTreeSet<String>,
+) -> Result<(), DatasetValidationError> {
+    let scene_path = root.join("scene.json");
+    let scene: SceneSnapshot = read_json(&scene_path)?;
+    if scene.scene_id().get() != expected_scene_id {
+        return Err(DatasetValidationError::SceneMetadataIdentity { path: scene_path });
+    }
+    let legal_ids = scene
+        .instances()
+        .iter()
+        .map(|instance| instance.instance_id().get())
+        .chain(std::iter::once(0))
+        .collect::<BTreeSet<_>>();
+    let frames = root.join("frames");
+    let entries = fs::read_dir(&frames).map_err(|source| io_error(&frames, source))?;
+    let mut camera_count = 0_u64;
+    let mut channel_shape = None;
+    for entry in entries {
+        let entry = entry.map_err(|source| io_error(&frames, source))?;
+        let directory = entry.path();
+        if !entry
+            .file_type()
+            .map_err(|source| io_error(&directory, source))?
+            .is_dir()
+        {
+            return Err(DatasetValidationError::InvalidFramePath { path: directory });
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return Err(DatasetValidationError::InvalidFramePath { path: directory });
+        };
+        let Ok(camera_id) = name.parse::<u16>() else {
+            return Err(DatasetValidationError::InvalidFramePath { path: directory });
+        };
+        if name != format!("{camera_id:05}") {
+            return Err(DatasetValidationError::InvalidFramePath { path: directory });
+        }
+        let metadata_path = directory.join("frame.json");
+        let camera: CameraSnapshot = read_json(&metadata_path)?;
+        if camera.camera_id().get() != camera_id {
+            return Err(DatasetValidationError::CameraMetadataIdentity {
+                path: metadata_path,
+            });
+        }
+        let prefix = format!("frames/{name}/");
+        let shape = ["rgb.png", "depth.exr", "instance.png"]
+            .map(|artifact| declared.contains(&format!("{prefix}{artifact}")));
+        if !shape.iter().any(|present| *present)
+            || channel_shape.is_some_and(|prior| prior != shape)
+        {
+            return Err(DatasetValidationError::InconsistentChannels { path: directory });
+        }
+        channel_shape = Some(shape);
+        let size = camera.image_size();
+        if shape[0] {
+            validate_png(
+                &directory.join("rgb.png"),
+                size.width(),
+                size.height(),
+                png::ColorType::Rgb,
+                png::BitDepth::Eight,
+                None,
+            )?;
+        }
+        if shape[1] {
+            validate_depth(&directory.join("depth.exr"), size.width(), size.height())?;
+        }
+        if shape[2] {
+            validate_png(
+                &directory.join("instance.png"),
+                size.width(),
+                size.height(),
+                png::ColorType::Grayscale,
+                png::BitDepth::Sixteen,
+                Some(&legal_ids),
+            )?;
+        }
+        camera_count = camera_count
+            .checked_add(1)
+            .ok_or(DatasetValidationError::CountOverflow)?;
+    }
+    if camera_count == 0 {
+        return Err(DatasetValidationError::EmptyFrames { path: frames });
+    }
+    Ok(())
+}
+
+fn collect_content_files(root: &Path) -> Result<BTreeSet<String>, DatasetValidationError> {
+    fn visit(
+        base: &Path,
+        directory: &Path,
+        files: &mut BTreeSet<String>,
+    ) -> Result<(), DatasetValidationError> {
+        for entry in fs::read_dir(directory).map_err(|source| io_error(directory, source))? {
+            let entry = entry.map_err(|source| io_error(directory, source))?;
+            let path = entry.path();
+            let kind = entry
+                .file_type()
+                .map_err(|source| io_error(&path, source))?;
+            if kind.is_dir() {
+                visit(base, &path, files)?;
+            } else if kind.is_file()
+                && path.file_name().and_then(|name| name.to_str()) != Some("checksums.json")
+            {
+                let relative = path
+                    .strip_prefix(base)
+                    .expect("walked dataset child")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                files.insert(relative);
+            } else if !kind.is_file() {
+                return Err(DatasetValidationError::InvalidScenePath { path });
+            }
+        }
+        Ok(())
+    }
+    let mut files = BTreeSet::new();
+    visit(root, root, &mut files)?;
+    Ok(files)
+}
+
+fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, DatasetValidationError> {
+    let bytes = fs::read(path).map_err(|source| io_error(path, source))?;
+    serde_json::from_slice(&bytes).map_err(|source| DatasetValidationError::Json {
+        path: path.to_owned(),
+        source,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredChecksumManifest {
+    schema_version: u16,
+    scene_id: u64,
+    files: BTreeMap<String, String>,
+}
 
 /// Validates every requested staged frame and writes deterministic BLAKE3 checksums.
 ///
@@ -65,6 +327,89 @@ pub fn validate_and_write_checksums(
 /// Failure while validating renderer output before publication.
 #[derive(Debug, Error)]
 pub enum DatasetValidationError {
+    /// A JSON metadata file is malformed or violates its schema.
+    #[error("invalid dataset JSON at {path}: {source}")]
+    Json {
+        /// Malformed metadata path.
+        path: PathBuf,
+        /// JSON parser diagnostic.
+        #[source]
+        source: serde_json::Error,
+    },
+    /// Stored resolved configuration does not match the run manifest.
+    #[error("resolved configuration fingerprint does not match run.json")]
+    ResolvedConfigFingerprint,
+    /// A committed scene path is not a canonical directory in the run domain.
+    #[error("invalid committed scene path {path}")]
+    InvalidScenePath {
+        /// Rejected filesystem path.
+        path: PathBuf,
+    },
+    /// The dataset does not contain the complete requested scene domain.
+    #[error("dataset contains {actual} scenes; expected {expected}")]
+    IncompleteDataset {
+        /// Scene count declared by the run manifest.
+        expected: u64,
+        /// Canonical committed scene directories found.
+        actual: u64,
+    },
+    /// A checksum manifest belongs to another schema or scene.
+    #[error("checksum manifest identity is invalid at {path}")]
+    ChecksumManifestIdentity {
+        /// Invalid checksum manifest path.
+        path: PathBuf,
+    },
+    /// A checksum manifest contains a path that could escape its scene.
+    #[error("unsafe path in checksum manifest: {path}")]
+    UnsafeChecksumPath {
+        /// Rejected relative path.
+        path: PathBuf,
+    },
+    /// Stored checksum entries and committed content files differ.
+    #[error("stored checksums do not cover exactly the content below {path}")]
+    FileSetMismatch {
+        /// Scene directory with inconsistent coverage.
+        path: PathBuf,
+    },
+    /// A committed file no longer matches its stored digest.
+    #[error("checksum mismatch at {path}")]
+    ChecksumMismatch {
+        /// Modified or corrupt content file.
+        path: PathBuf,
+    },
+    /// Stored scene metadata names another scene.
+    #[error("scene metadata identity is invalid at {path}")]
+    SceneMetadataIdentity {
+        /// Invalid scene metadata path.
+        path: PathBuf,
+    },
+    /// A frame directory name is not canonical.
+    #[error("invalid frame path {path}")]
+    InvalidFramePath {
+        /// Rejected filesystem path.
+        path: PathBuf,
+    },
+    /// Stored frame metadata names another camera.
+    #[error("camera metadata identity is invalid at {path}")]
+    CameraMetadataIdentity {
+        /// Invalid frame metadata path.
+        path: PathBuf,
+    },
+    /// Cameras do not expose one consistent nonempty channel set.
+    #[error("inconsistent or empty render channels at {path}")]
+    InconsistentChannels {
+        /// Frame directory exposing the inconsistency.
+        path: PathBuf,
+    },
+    /// A committed scene has no camera frames.
+    #[error("committed scene has no frames at {path}")]
+    EmptyFrames {
+        /// Empty frames directory.
+        path: PathBuf,
+    },
+    /// A platform count could not be represented safely.
+    #[error("dataset file count overflow")]
+    CountOverflow,
     /// An artifact could not be read or checksum output could not be written.
     #[error("dataset validation I/O failed at {path}: {source}")]
     Io {

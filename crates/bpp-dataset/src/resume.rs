@@ -330,7 +330,7 @@ pub enum DatasetOpenError {
     IncompatibleResolvedConfig,
 }
 
-fn fingerprint_config(bytes: &[u8]) -> String {
+pub(crate) fn fingerprint_config(bytes: &[u8]) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(CONFIG_FINGERPRINT_DOMAIN);
     hasher.update(&(bytes.len() as u64).to_le_bytes());

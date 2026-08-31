@@ -279,7 +279,27 @@ fn execute(command: Command) -> ExitCode {
             output,
             resume,
         } => generate(&config, renderer, &output, resume),
+        Command::Validate { dataset } => validate(&dataset),
         other => unavailable_command(&other),
+    }
+}
+
+fn validate(dataset: &std::path::Path) -> ExitCode {
+    match bpp_dataset::validate_dataset(dataset) {
+        Ok(report) => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "scene_count": report.scene_count(),
+                    "file_count": report.file_count(),
+                })
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("dataset validation failed: {error}");
+            ExitCode::from(5)
+        }
     }
 }
 
@@ -655,10 +675,11 @@ fn unavailable_command(command: &Command) -> ExitCode {
             Command::Simulate { .. } => "simulate",
             Command::Render { .. } => "render",
             Command::Generate { .. } => "generate",
-            Command::Validate { .. } => "validate",
             Command::ExportBop { .. } => "export bop",
             Command::Bench { .. } => "bench",
-            Command::Doctor { .. } | Command::Schema => unreachable!("implemented command"),
+            Command::Doctor { .. } | Command::Schema | Command::Validate { .. } => {
+                unreachable!("implemented command")
+            }
         }
     );
     ExitCode::from(3)
@@ -1035,5 +1056,15 @@ mod tests {
             let path = frame.join(artifact);
             assert!(path.metadata().is_ok_and(|metadata| metadata.len() > 0));
         }
+
+        assert_eq!(
+            run(["validate".to_owned(), dataset.display().to_string()]),
+            std::process::ExitCode::SUCCESS
+        );
+        fs::write(frame.join("rgb.png"), b"corrupt").expect("corrupt committed RGB");
+        assert_eq!(
+            run(["validate".to_owned(), dataset.display().to_string()]),
+            std::process::ExitCode::from(5)
+        );
     }
 }

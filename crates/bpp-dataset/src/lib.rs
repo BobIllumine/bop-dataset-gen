@@ -15,4 +15,6 @@ pub use snapshot_corpus::{
 pub use staging::{
     InvalidSceneArtifactRequirements, SceneArtifactRequirements, SceneCommitError, SceneStagingArea,
 };
-pub use validation::{DatasetValidationError, validate_and_write_checksums};
+pub use validation::{
+    DatasetValidationError, DatasetValidationReport, validate_and_write_checksums, validate_dataset,
+};
