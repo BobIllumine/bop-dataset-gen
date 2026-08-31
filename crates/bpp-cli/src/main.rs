@@ -265,7 +265,51 @@ fn execute(command: Command) -> ExitCode {
             println!("{}", bpp_core::run_config_json_schema());
             ExitCode::SUCCESS
         }
+        Command::PrepareAssets { config } => prepare_assets(&config),
         other => unavailable_command(&other),
+    }
+}
+
+fn prepare_assets(config_path: &std::path::Path) -> ExitCode {
+    let bytes = match std::fs::read(config_path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!("cannot read config {}: {error}", config_path.display());
+            return ExitCode::from(2);
+        }
+    };
+    let text = match std::str::from_utf8(&bytes) {
+        Ok(text) => text,
+        Err(error) => {
+            eprintln!("config {} is not UTF-8: {error}", config_path.display());
+            return ExitCode::from(2);
+        }
+    };
+    let config = match bpp_core::RunConfig::from_toml(text) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("invalid config {}: {error}", config_path.display());
+            return ExitCode::from(2);
+        }
+    };
+    let directory = config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    match bpp_pipeline::prepare_asset_catalog(config.plan(), directory) {
+        Ok(prepared) => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "asset_count": prepared.visual_assets().len(),
+                    "asset_catalog_fingerprint": prepared.visual_assets().fingerprint(),
+                })
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("asset preparation failed: {error}");
+            ExitCode::from(2)
+        }
     }
 }
 
@@ -526,6 +570,23 @@ mod tests {
                 "blenderproc".to_owned()
             ]),
             std::process::ExitCode::from(3)
+        );
+    }
+
+    #[test]
+    fn prepare_assets_reports_missing_config_as_configuration_failure() {
+        let missing = std::env::temp_dir().join(format!(
+            "bpp-missing-config-{}-{}.toml",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        assert_eq!(
+            run([
+                "prepare-assets".to_owned(),
+                "--config".to_owned(),
+                missing.display().to_string(),
+            ]),
+            std::process::ExitCode::from(2)
         );
     }
 }
