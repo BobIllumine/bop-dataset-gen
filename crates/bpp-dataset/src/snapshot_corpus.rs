@@ -88,6 +88,51 @@ pub fn open_snapshot_corpus(
     Ok(())
 }
 
+/// Validates an existing snapshot corpus without creating or changing files.
+///
+/// # Errors
+///
+/// Returns a typed error when the manifest or exact resolved configuration is
+/// missing, malformed, unreadable, or incompatible with the requested run.
+pub fn validate_snapshot_corpus(
+    corpus_root: &Path,
+    resolved_config_bytes: &[u8],
+    asset_catalog_fingerprint: &str,
+    total_scene_count: u64,
+) -> Result<(), SnapshotCorpusOpenError> {
+    if asset_catalog_fingerprint.trim().is_empty() {
+        return Err(SnapshotCorpusOpenError::BlankAssetCatalogFingerprint);
+    }
+    if total_scene_count == 0 {
+        return Err(SnapshotCorpusOpenError::ZeroScenes);
+    }
+    let requested = SnapshotCorpusManifest {
+        schema_version: CORPUS_MANIFEST_SCHEMA_VERSION,
+        resolved_config_fingerprint: fingerprint_config(resolved_config_bytes),
+        asset_catalog_fingerprint: asset_catalog_fingerprint.to_owned(),
+        total_scene_count,
+    };
+    let manifest_path = corpus_root.join("corpus.json");
+    let bytes = fs::read(&manifest_path).map_err(|source| SnapshotCorpusOpenError::Io {
+        path: manifest_path,
+        source,
+    })?;
+    let existing: SnapshotCorpusManifest =
+        serde_json::from_slice(&bytes).map_err(SnapshotCorpusOpenError::ParseManifest)?;
+    if existing != requested {
+        return Err(SnapshotCorpusOpenError::IncompatibleManifest);
+    }
+    let config_path = corpus_root.join("resolved-config.toml");
+    let existing_config = fs::read(&config_path).map_err(|source| SnapshotCorpusOpenError::Io {
+        path: config_path,
+        source,
+    })?;
+    if existing_config != resolved_config_bytes {
+        return Err(SnapshotCorpusOpenError::IncompatibleResolvedConfig);
+    }
+    Ok(())
+}
+
 /// Failure while creating or resuming a snapshot corpus identity.
 #[derive(Debug, Error)]
 pub enum SnapshotCorpusOpenError {

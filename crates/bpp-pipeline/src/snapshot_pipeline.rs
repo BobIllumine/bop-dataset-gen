@@ -9,7 +9,7 @@ use bpp_core::{AssetId, RenderError, Renderer, RunPlan, SceneId};
 use bpp_dataset::{
     DatasetManifest, DatasetManifestError, DatasetOpenError, DatasetResumeIndex, SceneStagingArea,
     SnapshotCorpusError, SnapshotCorpusOpenError, open_snapshot_corpus, read_snapshot_corpus,
-    write_scene_snapshot,
+    validate_snapshot_corpus, write_scene_snapshot,
 };
 use bpp_physics_rapier::{PreparedPhysicsAsset, SceneGenerationError, SerialPhysicsGenerator};
 use thiserror::Error;
@@ -138,6 +138,12 @@ where
         catalog: &ResolvedAssetCatalog,
         snapshot_root: &Path,
     ) -> Result<SerialRunReport, SerialSnapshotRenderError> {
+        validate_snapshot_corpus(
+            snapshot_root,
+            resolved_config_bytes,
+            catalog.fingerprint(),
+            self.total_scene_count,
+        )?;
         let snapshots = read_snapshot_corpus(snapshot_root)?;
         let found = u64::try_from(snapshots.len())
             .map_err(|_| SerialSnapshotRenderError::SceneCountOverflow)?;
@@ -209,6 +215,9 @@ pub enum SerialSnapshotSimulationError {
 /// Failure while rendering an existing snapshot corpus.
 #[derive(Debug, Error)]
 pub enum SerialSnapshotRenderError {
+    /// Snapshot corpus identity is missing or incompatible.
+    #[error(transparent)]
+    CorpusOpen(#[from] SnapshotCorpusOpenError),
     /// Snapshot storage or parsing failed.
     #[error(transparent)]
     Corpus(#[from] SnapshotCorpusError),

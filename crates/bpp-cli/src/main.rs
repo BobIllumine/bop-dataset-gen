@@ -267,6 +267,18 @@ fn execute(command: Command) -> ExitCode {
         }
         Command::PrepareAssets { config } => prepare_assets(&config),
         Command::Simulate { config, output } => simulate(&config, &output),
+        Command::Render {
+            config,
+            snapshots,
+            renderer,
+            output,
+        } => render(&config, &snapshots, renderer, &output),
+        Command::Generate {
+            config,
+            renderer,
+            output,
+            resume,
+        } => generate(&config, renderer, &output, resume),
         other => unavailable_command(&other),
     }
 }
@@ -365,6 +377,273 @@ fn simulate(config_path: &std::path::Path, output: &std::path::Path) -> ExitCode
             eprintln!("simulation did not produce the requested corpus: {error}");
             ExitCode::from(4)
         }
+    }
+}
+
+fn render(
+    config_path: &std::path::Path,
+    snapshots: &std::path::Path,
+    renderer: RendererSelection,
+    output: &std::path::Path,
+) -> ExitCode {
+    let loaded = match load_run(config_path) {
+        Ok(loaded) => loaded,
+        Err(error) => return configuration_error(&error),
+    };
+    let prepared =
+        match bpp_pipeline::prepare_asset_catalog(loaded.config.plan(), &loaded.directory) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return configuration_error(&format!("asset preparation failed: {error}"));
+            }
+        };
+    match renderer {
+        RendererSelection::Wgpu => render_wgpu(&loaded, &prepared, snapshots, output),
+        RendererSelection::BlenderProc => render_blenderproc(&loaded, &prepared, snapshots, output),
+        RendererSelection::All => unreachable!("parser rejects all for render"),
+    }
+}
+
+fn generate(
+    config_path: &std::path::Path,
+    renderer: RendererSelection,
+    output: &std::path::Path,
+    resume: bool,
+) -> ExitCode {
+    let loaded = match load_run(config_path) {
+        Ok(loaded) => loaded,
+        Err(error) => return configuration_error(&error),
+    };
+    if !resume && output.exists() {
+        return configuration_error(&format!(
+            "output {} already exists; pass --resume to continue it",
+            output.display()
+        ));
+    }
+    let prepared =
+        match bpp_pipeline::prepare_asset_catalog(loaded.config.plan(), &loaded.directory) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return configuration_error(&format!("asset preparation failed: {error}"));
+            }
+        };
+    match renderer {
+        RendererSelection::Wgpu => generate_wgpu(&loaded, &prepared, output),
+        RendererSelection::BlenderProc => generate_blenderproc(&loaded, &prepared, output),
+        RendererSelection::All => unreachable!("parser rejects all for generate"),
+    }
+}
+
+#[cfg(feature = "wgpu")]
+fn render_wgpu(
+    loaded: &LoadedRun,
+    prepared: &bpp_pipeline::PreparedAssetCatalog,
+    snapshots: &std::path::Path,
+    output: &std::path::Path,
+) -> ExitCode {
+    match bpp_render_wgpu::WgpuRenderer::try_new(loaded.config.plan().renderers().wgpu()) {
+        Ok(renderer) => run_render(loaded, prepared, snapshots, output, renderer),
+        Err(error) => unavailable(format!("wgpu unavailable: {error}")),
+    }
+}
+
+#[cfg(not(feature = "wgpu"))]
+fn render_wgpu(
+    _loaded: &LoadedRun,
+    _prepared: &bpp_pipeline::PreparedAssetCatalog,
+    _snapshots: &std::path::Path,
+    _output: &std::path::Path,
+) -> ExitCode {
+    unavailable("wgpu is unavailable in this build")
+}
+
+#[cfg(feature = "blenderproc")]
+fn render_blenderproc(
+    loaded: &LoadedRun,
+    prepared: &bpp_pipeline::PreparedAssetCatalog,
+    snapshots: &std::path::Path,
+    output: &std::path::Path,
+) -> ExitCode {
+    let config = resolved_blenderproc_config(loaded);
+    match bpp_render_blenderproc::BlenderProcRenderer::try_new(config) {
+        Ok(renderer) => run_render(loaded, prepared, snapshots, output, renderer),
+        Err(error) => unavailable(format!("BlenderProc unavailable: {error}")),
+    }
+}
+
+#[cfg(not(feature = "blenderproc"))]
+fn render_blenderproc(
+    _loaded: &LoadedRun,
+    _prepared: &bpp_pipeline::PreparedAssetCatalog,
+    _snapshots: &std::path::Path,
+    _output: &std::path::Path,
+) -> ExitCode {
+    unavailable("BlenderProc is unavailable in this build")
+}
+
+fn run_render<R>(
+    loaded: &LoadedRun,
+    prepared: &bpp_pipeline::PreparedAssetCatalog,
+    snapshots: &std::path::Path,
+    output: &std::path::Path,
+    renderer: R,
+) -> ExitCode
+where
+    R: bpp_core::Renderer<
+            AssetCatalog = bpp_assets::ResolvedAssetCatalog,
+            StagingArea = bpp_dataset::SceneStagingArea,
+        >,
+{
+    let mut pipeline =
+        bpp_pipeline::SerialSnapshotRenderer::new(loaded.config.plan(), renderer, output);
+    match pipeline.run_to_completion(&loaded.bytes, prepared.visual_assets(), snapshots) {
+        Ok(report) => print_run_report(report),
+        Err(error) => {
+            eprintln!("render failed: {error}");
+            match error {
+                bpp_pipeline::SerialSnapshotRenderError::Render(_)
+                | bpp_pipeline::SerialSnapshotRenderError::RendererLifecycle(_) => {
+                    ExitCode::from(6)
+                }
+                _ => ExitCode::from(5),
+            }
+        }
+    }
+}
+
+#[cfg(feature = "wgpu")]
+fn generate_wgpu(
+    loaded: &LoadedRun,
+    prepared: &bpp_pipeline::PreparedAssetCatalog,
+    output: &std::path::Path,
+) -> ExitCode {
+    match bpp_render_wgpu::WgpuRenderer::try_new(loaded.config.plan().renderers().wgpu()) {
+        Ok(renderer) => run_generate(loaded, prepared, output, renderer),
+        Err(error) => unavailable(format!("wgpu unavailable: {error}")),
+    }
+}
+
+#[cfg(not(feature = "wgpu"))]
+fn generate_wgpu(
+    _loaded: &LoadedRun,
+    _prepared: &bpp_pipeline::PreparedAssetCatalog,
+    _output: &std::path::Path,
+) -> ExitCode {
+    unavailable("wgpu is unavailable in this build")
+}
+
+#[cfg(feature = "blenderproc")]
+fn generate_blenderproc(
+    loaded: &LoadedRun,
+    prepared: &bpp_pipeline::PreparedAssetCatalog,
+    output: &std::path::Path,
+) -> ExitCode {
+    match bpp_render_blenderproc::BlenderProcRenderer::try_new(resolved_blenderproc_config(loaded))
+    {
+        Ok(renderer) => run_generate(loaded, prepared, output, renderer),
+        Err(error) => unavailable(format!("BlenderProc unavailable: {error}")),
+    }
+}
+
+#[cfg(not(feature = "blenderproc"))]
+fn generate_blenderproc(
+    _loaded: &LoadedRun,
+    _prepared: &bpp_pipeline::PreparedAssetCatalog,
+    _output: &std::path::Path,
+) -> ExitCode {
+    unavailable("BlenderProc is unavailable in this build")
+}
+
+fn run_generate<R>(
+    loaded: &LoadedRun,
+    prepared: &bpp_pipeline::PreparedAssetCatalog,
+    output: &std::path::Path,
+    renderer: R,
+) -> ExitCode
+where
+    R: bpp_core::Renderer<
+            AssetCatalog = bpp_assets::ResolvedAssetCatalog,
+            StagingArea = bpp_dataset::SceneStagingArea,
+        >,
+{
+    let mut pipeline = match bpp_pipeline::SerialGenerationPipeline::try_new(
+        loaded.config.plan(),
+        prepared.shared_physics_assets(),
+        renderer,
+        output,
+    ) {
+        Ok(pipeline) => pipeline,
+        Err(error) => return configuration_error(&format!("generation setup failed: {error}")),
+    };
+    match pipeline.run_to_completion(&loaded.bytes, prepared.visual_assets()) {
+        Ok(report) => print_run_report(report),
+        Err(error) => {
+            eprintln!("generation failed: {error}");
+            match error {
+                bpp_pipeline::SerialGenerationPipelineError::Physics(_) => ExitCode::from(4),
+                bpp_pipeline::SerialGenerationPipelineError::Render(_)
+                | bpp_pipeline::SerialGenerationPipelineError::RendererLifecycle(_) => {
+                    ExitCode::from(6)
+                }
+                bpp_pipeline::SerialGenerationPipelineError::Request(_) => ExitCode::from(2),
+                _ => ExitCode::from(5),
+            }
+        }
+    }
+}
+
+fn print_run_report(report: bpp_pipeline::SerialRunReport) -> ExitCode {
+    println!(
+        "{}",
+        serde_json::json!({
+            "preexisting_scenes": report.preexisting_scene_count(),
+            "generated_scenes": report.generated_scene_count(),
+            "total_scenes": report.total_scene_count(),
+            "cancelled": report.was_cancelled(),
+        })
+    );
+    ExitCode::SUCCESS
+}
+
+fn unavailable(message: impl std::fmt::Display) -> ExitCode {
+    eprintln!("{message}");
+    ExitCode::from(3)
+}
+
+#[cfg(feature = "blenderproc")]
+fn resolved_blenderproc_config(loaded: &LoadedRun) -> bpp_core::BlenderProcRendererConfig {
+    let configured = loaded.config.plan().renderers().blenderproc();
+    let executable = std::env::var_os("BPP_BLENDERPROC_EXECUTABLE").map_or_else(
+        || resolve_executable_path(&loaded.directory, configured.executable_path()),
+        PathBuf::from,
+    );
+    let worker = resolve_runtime_path(&loaded.directory, configured.worker_path());
+    bpp_core::BlenderProcRendererConfig::try_new(
+        executable,
+        worker,
+        configured.device_selection(),
+        configured.handshake_timeout_s(),
+        configured.request_timeout_s(),
+        configured.stderr_tail_capacity(),
+    )
+    .expect("resolving checked paths preserves renderer config invariants")
+}
+
+#[cfg(feature = "blenderproc")]
+fn resolve_runtime_path(base: &std::path::Path, configured: &std::path::Path) -> PathBuf {
+    if configured.is_absolute() {
+        configured.to_owned()
+    } else {
+        base.join(configured)
+    }
+}
+
+#[cfg(feature = "blenderproc")]
+fn resolve_executable_path(base: &std::path::Path, configured: &std::path::Path) -> PathBuf {
+    if configured.is_absolute() || configured.components().count() == 1 {
+        configured.to_owned()
+    } else {
+        base.join(configured)
     }
 }
 
@@ -660,6 +939,55 @@ mod tests {
                 "unused-corpus".to_owned(),
             ]),
             std::process::ExitCode::from(2)
+        );
+    }
+
+    #[test]
+    fn render_and_generate_report_missing_configs_as_configuration_failures() {
+        let missing = std::env::temp_dir().join(format!(
+            "bpp-missing-render-config-{}.toml",
+            std::process::id()
+        ));
+        let path = missing.display().to_string();
+        assert_eq!(
+            run([
+                "render".to_owned(),
+                "--config".to_owned(),
+                path.clone(),
+                "--snapshots".to_owned(),
+                "unused-corpus".to_owned(),
+                "--renderer".to_owned(),
+                "wgpu".to_owned(),
+                "--output".to_owned(),
+                "unused-dataset".to_owned(),
+            ]),
+            std::process::ExitCode::from(2)
+        );
+        assert_eq!(
+            run([
+                "generate".to_owned(),
+                "--config".to_owned(),
+                path,
+                "--renderer".to_owned(),
+                "wgpu".to_owned(),
+                "--output".to_owned(),
+                "unused-dataset".to_owned(),
+            ]),
+            std::process::ExitCode::from(2)
+        );
+    }
+
+    #[cfg(feature = "blenderproc")]
+    #[test]
+    fn blenderproc_bare_executable_uses_path_but_relative_worker_paths_use_config_directory() {
+        let base = std::path::Path::new("/project/config");
+        assert_eq!(
+            super::resolve_executable_path(base, std::path::Path::new("blenderproc")),
+            PathBuf::from("blenderproc")
+        );
+        assert_eq!(
+            super::resolve_executable_path(base, std::path::Path::new("tools/blenderproc")),
+            PathBuf::from("/project/config/tools/blenderproc")
         );
     }
 }

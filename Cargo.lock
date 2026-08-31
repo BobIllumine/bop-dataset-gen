@@ -170,7 +170,9 @@ dependencies = [
 name = "bpp-cli"
 version = "0.1.0"
 dependencies = [
+ "bpp-assets",
  "bpp-core",
+ "bpp-dataset",
  "bpp-pipeline",
  "bpp-render-blenderproc",
  "bpp-render-wgpu",

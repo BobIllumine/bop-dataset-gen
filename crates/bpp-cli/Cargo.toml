@@ -21,6 +21,8 @@ workspace = true
 
 [dependencies]
 bpp-pipeline = { path = "../bpp-pipeline", default-features = false }
+bpp-assets = { path = "../bpp-assets" }
+bpp-dataset = { path = "../bpp-dataset" }
 bpp-core = { path = "../bpp-core", features = ["schema"] }
 bpp-render-wgpu = { path = "../bpp-render-wgpu", optional = true }
 bpp-render-blenderproc = { path = "../bpp-render-blenderproc", optional = true }

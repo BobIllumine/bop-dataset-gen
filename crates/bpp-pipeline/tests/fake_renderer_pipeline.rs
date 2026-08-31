@@ -406,6 +406,23 @@ fn simulation_corpus_feeds_render_only_pipeline_without_physics_reexecution() {
         resolved_config.as_bytes()
     );
 
+    let incompatible_dataset = tempfile::tempdir().unwrap();
+    let mut incompatible_renderer = SerialSnapshotRenderer::new(
+        &plan,
+        FakeRenderer::all_channels(),
+        incompatible_dataset.path(),
+    );
+    assert!(
+        incompatible_renderer
+            .run_to_completion(
+                b"different resolved config",
+                &visual_catalog,
+                snapshots_root.path(),
+            )
+            .is_err()
+    );
+    assert!(!incompatible_dataset.path().join("run.json").exists());
+
     let mut renderer =
         SerialSnapshotRenderer::new(&plan, FakeRenderer::all_channels(), dataset_root.path());
     let rendering = renderer
