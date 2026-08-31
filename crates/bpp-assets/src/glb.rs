@@ -226,6 +226,18 @@ pub struct LoadedVisualAsset {
 }
 
 impl LoadedVisualAsset {
+    /// Wraps a checked mesh that has no source material or texture tables.
+    ///
+    /// This is the canonical bridge for material-less formats such as STL.
+    #[must_use]
+    pub fn from_unmaterialized_mesh(visual_mesh: VisualMesh) -> Self {
+        Self {
+            visual_mesh,
+            materials: Vec::new(),
+            textures: Vec::new(),
+        }
+    }
+
     /// Returns scene-instanced visual geometry in metres in the GLB asset frame.
     #[must_use]
     pub const fn visual_mesh(&self) -> &VisualMesh {

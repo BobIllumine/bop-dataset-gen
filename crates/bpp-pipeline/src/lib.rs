@@ -1,11 +1,13 @@
 //! Bounded orchestration for physics, rendering, and dataset commits.
 
+mod asset_preparation;
 mod benchmark;
 mod cancellation;
 mod request_planner;
 mod serial_generation;
 mod snapshot_pipeline;
 
+pub use asset_preparation::{AssetPreparationError, PreparedAssetCatalog, prepare_asset_catalog};
 pub use benchmark::{InvalidRenderBenchmarkSummary, RenderBenchmarkSummary};
 pub use cancellation::CancellationToken;
 pub use request_planner::{RenderRequestPlanner, RenderRequestPlanningError};
