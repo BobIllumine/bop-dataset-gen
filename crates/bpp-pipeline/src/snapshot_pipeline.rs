@@ -8,7 +8,8 @@ use bpp_assets::ResolvedAssetCatalog;
 use bpp_core::{AssetId, RenderError, Renderer, RunPlan, SceneId};
 use bpp_dataset::{
     DatasetManifest, DatasetManifestError, DatasetOpenError, DatasetResumeIndex, SceneStagingArea,
-    SnapshotCorpusError, read_snapshot_corpus, write_scene_snapshot,
+    SnapshotCorpusError, SnapshotCorpusOpenError, open_snapshot_corpus, read_snapshot_corpus,
+    write_scene_snapshot,
 };
 use bpp_physics_rapier::{PreparedPhysicsAsset, SceneGenerationError, SerialPhysicsGenerator};
 use thiserror::Error;
@@ -50,9 +51,17 @@ impl SerialSnapshotSimulator {
     /// Returns a typed corpus or scene-generation failure.
     pub fn run(
         &self,
+        resolved_config_bytes: &[u8],
+        asset_catalog_fingerprint: &str,
         corpus_root: &Path,
         cancellation: &CancellationToken,
     ) -> Result<SerialRunReport, SerialSnapshotSimulationError> {
+        open_snapshot_corpus(
+            corpus_root,
+            resolved_config_bytes,
+            asset_catalog_fingerprint,
+            self.total_scene_count,
+        )?;
         let existing = if corpus_root.join("scenes").exists() {
             read_snapshot_corpus(corpus_root)?
         } else {
@@ -175,6 +184,9 @@ where
 /// Failure while generating a physics-only snapshot corpus.
 #[derive(Debug, Error)]
 pub enum SerialSnapshotSimulationError {
+    /// Snapshot corpus identity creation or compatibility failed.
+    #[error(transparent)]
+    CorpusOpen(#[from] SnapshotCorpusOpenError),
     /// Physics generation failed.
     #[error(transparent)]
     Physics(#[from] SceneGenerationError),

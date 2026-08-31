@@ -1,14 +1,124 @@
 use std::{
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 
 use bpp_core::{SceneId, SceneSnapshot};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 static NEXT_SNAPSHOT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+static NEXT_CORPUS_MANIFEST_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+const CORPUS_MANIFEST_SCHEMA_VERSION: u32 = 1;
+const CORPUS_CONFIG_DOMAIN: &[u8] = b"bpp.dataset.snapshot-config.v1";
+
+#[derive(Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotCorpusManifest {
+    schema_version: u32,
+    resolved_config_fingerprint: String,
+    asset_catalog_fingerprint: String,
+    total_scene_count: u64,
+}
+
+/// Creates or validates the immutable identity of a renderer-neutral corpus.
+///
+/// Exact resolved configuration bytes are persisted beside the manifest. An
+/// existing corpus is accepted only when config bytes, asset fingerprint, and
+/// scene-ID domain are identical.
+///
+/// # Errors
+///
+/// Returns a typed invalid-input, incompatibility, serialization, parse, or
+/// filesystem failure before any scene is read or written.
+pub fn open_snapshot_corpus(
+    corpus_root: &Path,
+    resolved_config_bytes: &[u8],
+    asset_catalog_fingerprint: &str,
+    total_scene_count: u64,
+) -> Result<(), SnapshotCorpusOpenError> {
+    if asset_catalog_fingerprint.trim().is_empty() {
+        return Err(SnapshotCorpusOpenError::BlankAssetCatalogFingerprint);
+    }
+    if total_scene_count == 0 {
+        return Err(SnapshotCorpusOpenError::ZeroScenes);
+    }
+    fs::create_dir_all(corpus_root).map_err(|source| SnapshotCorpusOpenError::Io {
+        path: corpus_root.to_owned(),
+        source,
+    })?;
+    let requested = SnapshotCorpusManifest {
+        schema_version: CORPUS_MANIFEST_SCHEMA_VERSION,
+        resolved_config_fingerprint: fingerprint_config(resolved_config_bytes),
+        asset_catalog_fingerprint: asset_catalog_fingerprint.to_owned(),
+        total_scene_count,
+    };
+    let manifest_path = corpus_root.join("corpus.json");
+    let mut manifest_bytes =
+        serde_json::to_vec(&requested).map_err(SnapshotCorpusOpenError::SerializeManifest)?;
+    manifest_bytes.push(b'\n');
+    if !install_file(corpus_root, &manifest_path, &manifest_bytes, "corpus")? {
+        let bytes = fs::read(&manifest_path).map_err(|source| SnapshotCorpusOpenError::Io {
+            path: manifest_path.clone(),
+            source,
+        })?;
+        let existing: SnapshotCorpusManifest =
+            serde_json::from_slice(&bytes).map_err(SnapshotCorpusOpenError::ParseManifest)?;
+        if existing != requested {
+            return Err(SnapshotCorpusOpenError::IncompatibleManifest);
+        }
+    }
+    let config_path = corpus_root.join("resolved-config.toml");
+    if !install_file(
+        corpus_root,
+        &config_path,
+        resolved_config_bytes,
+        "resolved-config",
+    )? {
+        let existing = fs::read(&config_path).map_err(|source| SnapshotCorpusOpenError::Io {
+            path: config_path.clone(),
+            source,
+        })?;
+        if existing != resolved_config_bytes {
+            return Err(SnapshotCorpusOpenError::IncompatibleResolvedConfig);
+        }
+    }
+    Ok(())
+}
+
+/// Failure while creating or resuming a snapshot corpus identity.
+#[derive(Debug, Error)]
+pub enum SnapshotCorpusOpenError {
+    /// The immutable asset identity contains no text.
+    #[error("asset catalog fingerprint must not be blank")]
+    BlankAssetCatalogFingerprint,
+    /// A corpus cannot request zero scenes.
+    #[error("snapshot corpus scene count must not be zero")]
+    ZeroScenes,
+    /// A new manifest could not be serialized.
+    #[error("snapshot corpus manifest serialization failed: {0}")]
+    SerializeManifest(serde_json::Error),
+    /// A stored manifest is malformed or has the wrong shape.
+    #[error("stored snapshot corpus manifest is invalid: {0}")]
+    ParseManifest(serde_json::Error),
+    /// Existing immutable corpus identity differs from the requested run.
+    #[error("existing snapshot corpus manifest is incompatible with the requested run")]
+    IncompatibleManifest,
+    /// Existing resolved configuration bytes differ from the requested bytes.
+    #[error("resolved configuration is incompatible with the snapshot corpus")]
+    IncompatibleResolvedConfig,
+    /// Filesystem access failed.
+    #[error("snapshot corpus identity I/O failed at {path}: {source}")]
+    Io {
+        /// Path involved in the operation.
+        path: PathBuf,
+        /// Underlying failure.
+        #[source]
+        source: io::Error,
+    },
+}
 
 /// Atomically publishes one canonical physical scene for a later render-only pass.
 ///
@@ -203,6 +313,78 @@ fn create_temporary_directory(
         source: io::Error::new(
             io::ErrorKind::AlreadyExists,
             "could not allocate snapshot staging directory",
+        ),
+    })
+}
+
+fn fingerprint_config(bytes: &[u8]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(CORPUS_CONFIG_DOMAIN);
+    hasher.update(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(bytes);
+    hasher.finalize().to_hex().to_string()
+}
+
+fn install_file(
+    root: &Path,
+    target: &Path,
+    bytes: &[u8],
+    label: &str,
+) -> Result<bool, SnapshotCorpusOpenError> {
+    if target.exists() {
+        return Ok(false);
+    }
+    for _ in 0..1024 {
+        let nonce = NEXT_CORPUS_MANIFEST_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let temporary = root.join(format!(".{label}-{}-{nonce:020}.tmp", std::process::id()));
+        let mut file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(source) => {
+                return Err(SnapshotCorpusOpenError::Io {
+                    path: temporary,
+                    source,
+                });
+            }
+        };
+        if let Err(source) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+            let _ = fs::remove_file(&temporary);
+            return Err(SnapshotCorpusOpenError::Io {
+                path: temporary,
+                source,
+            });
+        }
+        let installed = match fs::hard_link(&temporary, target) {
+            Ok(()) => true,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
+            Err(source) => {
+                let _ = fs::remove_file(&temporary);
+                return Err(SnapshotCorpusOpenError::Io {
+                    path: target.to_owned(),
+                    source,
+                });
+            }
+        };
+        let _ = fs::remove_file(&temporary);
+        if installed {
+            File::open(root)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|source| SnapshotCorpusOpenError::Io {
+                    path: root.to_owned(),
+                    source,
+                })?;
+        }
+        return Ok(installed);
+    }
+    Err(SnapshotCorpusOpenError::Io {
+        path: root.to_owned(),
+        source: io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not allocate snapshot manifest staging file",
         ),
     })
 }

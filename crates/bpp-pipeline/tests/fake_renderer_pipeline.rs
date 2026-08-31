@@ -1,6 +1,6 @@
 //! Complete renderer-boundary to atomic-dataset acceptance test.
 
-use std::{collections::BTreeMap, num::NonZeroU32, sync::Arc};
+use std::{collections::BTreeMap, fs, num::NonZeroU32, sync::Arc};
 
 use bpp_assets::{
     ConvexPart, NormalizedAsset, ResolvedAsset, ResolvedAssetCatalog, VisualMesh, VisualPrimitive,
@@ -383,10 +383,29 @@ fn simulation_corpus_feeds_render_only_pipeline_without_physics_reexecution() {
     let cancellation = CancellationToken::new();
     let simulator = SerialSnapshotSimulator::try_new(&plan, prepared_assets()).unwrap();
 
-    let simulation = simulator.run(snapshots_root.path(), &cancellation).unwrap();
+    let visual_catalog = catalog();
+    let simulation = simulator
+        .run(
+            resolved_config.as_bytes(),
+            visual_catalog.fingerprint(),
+            snapshots_root.path(),
+            &cancellation,
+        )
+        .unwrap();
     assert_eq!(simulation.generated_scene_count(), 2);
 
-    let visual_catalog = catalog();
+    let incompatible = simulator.run(
+        b"different resolved config",
+        visual_catalog.fingerprint(),
+        snapshots_root.path(),
+        &cancellation,
+    );
+    assert!(incompatible.is_err());
+    assert_eq!(
+        fs::read(snapshots_root.path().join("resolved-config.toml")).unwrap(),
+        resolved_config.as_bytes()
+    );
+
     let mut renderer =
         SerialSnapshotRenderer::new(&plan, FakeRenderer::all_channels(), dataset_root.path());
     let rendering = renderer
