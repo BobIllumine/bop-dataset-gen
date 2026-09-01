@@ -13,6 +13,180 @@ const MANIFEST_SCHEMA_VERSION: u32 = 1;
 const CONFIG_FINGERPRINT_DOMAIN: &[u8] = b"bpp.dataset.resolved-config.v1";
 static NEXT_MANIFEST_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
+/// Versioned execution environment recorded beside a generated run.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RunEnvironment {
+    schema_version: u16,
+    generator_version: String,
+    target_os: String,
+    target_arch: String,
+    build_profile: String,
+    enabled_features: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunEnvironmentWire {
+    schema_version: u16,
+    generator_version: String,
+    target_os: String,
+    target_arch: String,
+    build_profile: String,
+    enabled_features: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for RunEnvironment {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = RunEnvironmentWire::deserialize(deserializer)?;
+        if wire.schema_version != 1 {
+            return Err(D::Error::custom("unsupported environment schema version"));
+        }
+        let canonical = Self::try_new(
+            wire.generator_version,
+            wire.target_os,
+            wire.target_arch,
+            wire.build_profile,
+            wire.enabled_features.clone(),
+        )
+        .map_err(D::Error::custom)?;
+        if canonical.enabled_features != wire.enabled_features {
+            return Err(D::Error::custom(
+                "environment features must be sorted and unique",
+            ));
+        }
+        Ok(canonical)
+    }
+}
+
+impl RunEnvironment {
+    /// Creates canonical nonblank environment provenance.
+    ///
+    /// Feature names are sorted and deduplicated for stable serialization.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidRunEnvironment`] if any scalar or feature is blank.
+    pub fn try_new(
+        generator_version: impl Into<String>,
+        target_os: impl Into<String>,
+        target_arch: impl Into<String>,
+        build_profile: impl Into<String>,
+        mut enabled_features: Vec<String>,
+    ) -> Result<Self, InvalidRunEnvironment> {
+        let generator_version = generator_version.into();
+        let target_os = target_os.into();
+        let target_arch = target_arch.into();
+        let build_profile = build_profile.into();
+        for (field, value) in [
+            ("generator_version", generator_version.as_str()),
+            ("target_os", target_os.as_str()),
+            ("target_arch", target_arch.as_str()),
+            ("build_profile", build_profile.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(InvalidRunEnvironment::BlankField { field });
+            }
+        }
+        if enabled_features
+            .iter()
+            .any(|feature| feature.trim().is_empty())
+        {
+            return Err(InvalidRunEnvironment::BlankFeature);
+        }
+        enabled_features.sort();
+        enabled_features.dedup();
+        Ok(Self {
+            schema_version: 1,
+            generator_version,
+            target_os,
+            target_arch,
+            build_profile,
+            enabled_features,
+        })
+    }
+}
+
+/// Invalid environment provenance supplied by a caller.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum InvalidRunEnvironment {
+    /// One required scalar is blank.
+    #[error("environment field {field} must not be blank")]
+    BlankField {
+        /// Stable field name.
+        field: &'static str,
+    },
+    /// A feature name is blank.
+    #[error("environment feature names must not be blank")]
+    BlankFeature,
+}
+
+/// Atomically persists environment provenance or accepts exact existing bytes.
+///
+/// # Errors
+///
+/// Returns a serialization, I/O, or incompatibility error without replacing
+/// existing provenance.
+pub fn persist_run_environment(
+    root: &Path,
+    environment: &RunEnvironment,
+) -> Result<(), DatasetOpenError> {
+    let path = root.join("environment.json");
+    let mut bytes = serde_json::to_vec(environment).map_err(DatasetOpenError::SerializeManifest)?;
+    bytes.push(b'\n');
+    if !install_bytes_atomically(root, &path, &bytes, "environment.json")? {
+        let existing = fs::read(&path).map_err(|source| DatasetOpenError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        if existing != bytes {
+            return Err(DatasetOpenError::IncompatibleEnvironment);
+        }
+    }
+    Ok(())
+}
+
+/// Checks existing environment provenance without changing the run directory.
+///
+/// # Errors
+///
+/// Returns an I/O, parse, or incompatibility error.
+pub fn validate_run_environment(
+    root: &Path,
+    expected: &RunEnvironment,
+) -> Result<(), DatasetOpenError> {
+    let path = root.join("environment.json");
+    let bytes = fs::read(&path).map_err(|source| DatasetOpenError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    let existing: RunEnvironment =
+        serde_json::from_slice(&bytes).map_err(DatasetOpenError::ParseEnvironment)?;
+    if &existing != expected {
+        return Err(DatasetOpenError::IncompatibleEnvironment);
+    }
+    Ok(())
+}
+
+/// Reads checked environment provenance without comparing it to this process.
+///
+/// This is used when consuming renderer-neutral artifacts: their producing
+/// environment remains provenance, but is not a renderer compatibility key.
+///
+/// # Errors
+///
+/// Returns an I/O or parse error.
+pub fn read_run_environment(root: &Path) -> Result<RunEnvironment, DatasetOpenError> {
+    let path = root.join("environment.json");
+    let bytes = fs::read(&path).map_err(|source| DatasetOpenError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    serde_json::from_slice(&bytes).map_err(DatasetOpenError::ParseEnvironment)
+}
+
 /// Immutable run identity used to reject incompatible dataset resumes.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DatasetManifest {
@@ -308,6 +482,9 @@ pub enum DatasetOpenError {
     /// A stored manifest is malformed JSON or has the wrong shape.
     #[error("stored dataset manifest is invalid: {0}")]
     ParseManifest(serde_json::Error),
+    /// Stored environment JSON is malformed or noncanonical.
+    #[error("stored environment provenance is invalid: {0}")]
+    ParseEnvironment(serde_json::Error),
     /// A stored manifest violates checked field invariants.
     #[error(transparent)]
     InvalidManifest(#[from] DatasetManifestError),
@@ -328,6 +505,9 @@ pub enum DatasetOpenError {
     /// Stored or supplied resolved configuration bytes contradict the manifest.
     #[error("resolved configuration bytes are incompatible with the dataset manifest")]
     IncompatibleResolvedConfig,
+    /// Stored execution environment differs from this invocation.
+    #[error("execution environment is incompatible with the stored run")]
+    IncompatibleEnvironment,
 }
 
 pub(crate) fn fingerprint_config(bytes: &[u8]) -> String {

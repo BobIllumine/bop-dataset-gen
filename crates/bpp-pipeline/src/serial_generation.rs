@@ -4,13 +4,14 @@ use bpp_assets::ResolvedAssetCatalog;
 use bpp_core::{AssetId, RenderError, Renderer, RunPlan, SceneId};
 use bpp_dataset::{
     DatasetManifest, DatasetManifestError, DatasetOpenError, DatasetResumeIndex, SceneStagingArea,
+    persist_run_environment,
 };
 use bpp_physics_rapier::{PreparedPhysicsAsset, SceneGenerationError, SerialPhysicsGenerator};
 use thiserror::Error;
 
 use crate::{
     CancellationToken, CompletedScene, PipelineRenderError, RenderRequestPlanner,
-    RenderRequestPlanningError, SerialDatasetRenderer,
+    RenderRequestPlanningError, SerialDatasetRenderer, current_run_environment,
 };
 
 /// Single-threaded reference composition of physics, request planning, rendering, and commit.
@@ -124,6 +125,7 @@ where
         )?;
         let resume = DatasetResumeIndex::open_or_create(&self.dataset_root, manifest)?;
         resume.persist_resolved_config(&self.dataset_root, resolved_config_bytes)?;
+        persist_run_environment(&self.dataset_root, &current_run_environment())?;
         let preexisting_scene_count = u64::try_from(resume.committed_scenes().len())
             .map_err(|_| SerialGenerationPipelineError::SceneCountOverflow)?;
 

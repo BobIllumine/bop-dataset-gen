@@ -7,7 +7,11 @@ mod staging;
 mod validation;
 
 pub use frames::{DepthFrame, FrameValidationError, FrameWriteError, InstanceFrame, RgbFrame};
-pub use resume::{DatasetManifest, DatasetManifestError, DatasetOpenError, DatasetResumeIndex};
+pub use resume::{
+    DatasetManifest, DatasetManifestError, DatasetOpenError, DatasetResumeIndex,
+    InvalidRunEnvironment, RunEnvironment, persist_run_environment, read_run_environment,
+    validate_run_environment,
+};
 pub use snapshot_corpus::{
     SnapshotCorpusError, SnapshotCorpusOpenError, open_snapshot_corpus, read_snapshot_corpus,
     validate_snapshot_corpus, write_scene_snapshot,

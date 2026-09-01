@@ -771,7 +771,9 @@ fn doctor_blenderproc() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
+    #[cfg(feature = "wgpu")]
+    use std::fs;
+    use std::path::PathBuf;
 
     use super::{Command, RendererSelection, parse, run};
 

@@ -3,6 +3,7 @@
 mod asset_preparation;
 mod benchmark;
 mod cancellation;
+mod parallel_physics;
 mod request_planner;
 mod serial_generation;
 mod snapshot_pipeline;
@@ -10,6 +11,10 @@ mod snapshot_pipeline;
 pub use asset_preparation::{AssetPreparationError, PreparedAssetCatalog, prepare_asset_catalog};
 pub use benchmark::{InvalidRenderBenchmarkSummary, RenderBenchmarkSummary};
 pub use cancellation::CancellationToken;
+pub use parallel_physics::{
+    InvalidParallelPhysicsExecutor, ParallelPhysicsExecutor, PhysicsSimulator, PhysicsStageReport,
+    PipelineError, SimulatorFactory,
+};
 pub use request_planner::{RenderRequestPlanner, RenderRequestPlanningError};
 pub use serial_generation::{
     SerialGenerationPipeline, SerialGenerationPipelineError, SerialRunReport,
@@ -18,6 +23,28 @@ pub use snapshot_pipeline::{
     SerialSnapshotRenderError, SerialSnapshotRenderer, SerialSnapshotSimulationError,
     SerialSnapshotSimulator,
 };
+
+fn current_run_environment() -> bpp_dataset::RunEnvironment {
+    let mut features = Vec::new();
+    if cfg!(feature = "fast") {
+        features.push("fast".to_owned());
+    }
+    if cfg!(feature = "reproducible") {
+        features.push("reproducible".to_owned());
+    }
+    bpp_dataset::RunEnvironment::try_new(
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
+        features,
+    )
+    .expect("compile-time run environment is nonblank")
+}
 
 use std::{
     fs::File,

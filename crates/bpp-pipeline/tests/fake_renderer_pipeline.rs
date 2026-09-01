@@ -317,6 +317,13 @@ fn serial_run_writes_provenance_and_resumes_without_duplicate_generation() {
         std::fs::read(root.path().join("resolved-config.toml")).unwrap(),
         resolved_config
     );
+    let environment: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.path().join("environment.json")).unwrap())
+            .unwrap();
+    assert_eq!(environment["schema_version"], 1);
+    assert_eq!(environment["generator_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(environment["target_os"], std::env::consts::OS);
+    assert_eq!(environment["target_arch"], std::env::consts::ARCH);
 
     let mut resumed = SerialGenerationPipeline::try_new(
         &plan,
@@ -405,6 +412,7 @@ fn simulation_corpus_feeds_render_only_pipeline_without_physics_reexecution() {
         fs::read(snapshots_root.path().join("resolved-config.toml")).unwrap(),
         resolved_config.as_bytes()
     );
+    assert!(snapshots_root.path().join("environment.json").is_file());
 
     let incompatible_dataset = tempfile::tempdir().unwrap();
     let mut incompatible_renderer = SerialSnapshotRenderer::new(
@@ -442,4 +450,52 @@ fn simulation_corpus_feeds_render_only_pipeline_without_physics_reexecution() {
             .count(),
         2
     );
+}
+
+#[test]
+fn render_only_pipeline_stops_after_the_in_flight_scene_and_resumes() {
+    let snapshots_root = tempfile::tempdir().unwrap();
+    let dataset_root = tempfile::tempdir().unwrap();
+    let resolved_config = include_str!("fixtures/serial_run.toml")
+        .replace("valid_scene_count = 1", "valid_scene_count = 2");
+    let plan = RunConfig::from_toml(&resolved_config).unwrap().into_plan();
+    let visual_catalog = catalog();
+    let simulator = SerialSnapshotSimulator::try_new(&plan, prepared_assets()).unwrap();
+    simulator
+        .run(
+            resolved_config.as_bytes(),
+            visual_catalog.fingerprint(),
+            snapshots_root.path(),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+    let cancellation = CancellationToken::new();
+    let mut interrupted = SerialSnapshotRenderer::new(
+        &plan,
+        FakeRenderer::cancelling(cancellation.clone()),
+        dataset_root.path(),
+    );
+    let report = interrupted
+        .run_until_cancelled(
+            resolved_config.as_bytes(),
+            &visual_catalog,
+            snapshots_root.path(),
+            &cancellation,
+        )
+        .unwrap();
+    assert!(report.was_cancelled());
+    assert_eq!(report.generated_scene_count(), 1);
+
+    let mut resumed =
+        SerialSnapshotRenderer::new(&plan, FakeRenderer::all_channels(), dataset_root.path());
+    let report = resumed
+        .run_to_completion(
+            resolved_config.as_bytes(),
+            &visual_catalog,
+            snapshots_root.path(),
+        )
+        .unwrap();
+    assert_eq!(report.preexisting_scene_count(), 1);
+    assert_eq!(report.generated_scene_count(), 1);
 }

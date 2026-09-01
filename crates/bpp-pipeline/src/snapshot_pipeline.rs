@@ -8,15 +8,15 @@ use bpp_assets::ResolvedAssetCatalog;
 use bpp_core::{AssetId, RenderError, Renderer, RunPlan, SceneId};
 use bpp_dataset::{
     DatasetManifest, DatasetManifestError, DatasetOpenError, DatasetResumeIndex, SceneStagingArea,
-    SnapshotCorpusError, SnapshotCorpusOpenError, open_snapshot_corpus, read_snapshot_corpus,
-    validate_snapshot_corpus, write_scene_snapshot,
+    SnapshotCorpusError, SnapshotCorpusOpenError, open_snapshot_corpus, persist_run_environment,
+    read_run_environment, read_snapshot_corpus, validate_snapshot_corpus, write_scene_snapshot,
 };
 use bpp_physics_rapier::{PreparedPhysicsAsset, SceneGenerationError, SerialPhysicsGenerator};
 use thiserror::Error;
 
 use crate::{
     CancellationToken, PipelineRenderError, RenderRequestPlanner, RenderRequestPlanningError,
-    SerialDatasetRenderer, SerialRunReport,
+    SerialDatasetRenderer, SerialRunReport, current_run_environment,
 };
 
 /// Serial physics-only executor that atomically publishes renderer-neutral scene snapshots.
@@ -62,6 +62,7 @@ impl SerialSnapshotSimulator {
             asset_catalog_fingerprint,
             self.total_scene_count,
         )?;
+        persist_run_environment(corpus_root, &current_run_environment())?;
         let existing = if corpus_root.join("scenes").exists() {
             read_snapshot_corpus(corpus_root)?
         } else {
@@ -138,12 +139,36 @@ where
         catalog: &ResolvedAssetCatalog,
         snapshot_root: &Path,
     ) -> Result<SerialRunReport, SerialSnapshotRenderError> {
+        self.run_until_cancelled(
+            resolved_config_bytes,
+            catalog,
+            snapshot_root,
+            &CancellationToken::new(),
+        )
+    }
+
+    /// Renders pending snapshots until completion or cooperative cancellation.
+    ///
+    /// Cancellation is observed before renderer preparation and before each
+    /// scene. An in-flight render reaches its atomic commit boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same typed failures as [`Self::run_to_completion`].
+    pub fn run_until_cancelled(
+        &mut self,
+        resolved_config_bytes: &[u8],
+        catalog: &ResolvedAssetCatalog,
+        snapshot_root: &Path,
+        cancellation: &CancellationToken,
+    ) -> Result<SerialRunReport, SerialSnapshotRenderError> {
         validate_snapshot_corpus(
             snapshot_root,
             resolved_config_bytes,
             catalog.fingerprint(),
             self.total_scene_count,
         )?;
+        let _producer_environment = read_run_environment(snapshot_root)?;
         let snapshots = read_snapshot_corpus(snapshot_root)?;
         let found = u64::try_from(snapshots.len())
             .map_err(|_| SerialSnapshotRenderError::SceneCountOverflow)?;
@@ -166,11 +191,23 @@ where
         )?;
         let resume = DatasetResumeIndex::open_or_create(&self.dataset_root, manifest)?;
         resume.persist_resolved_config(&self.dataset_root, resolved_config_bytes)?;
+        persist_run_environment(&self.dataset_root, &current_run_environment())?;
         let preexisting = u64::try_from(resume.committed_scenes().len())
             .map_err(|_| SerialSnapshotRenderError::SceneCountOverflow)?;
+        if cancellation.is_cancelled() {
+            return Ok(SerialRunReport::new(
+                preexisting,
+                0,
+                self.total_scene_count,
+                true,
+            ));
+        }
         self.dataset.prepare(catalog)?;
         let mut generated = 0;
         for scene_id in resume.pending_scenes() {
+            if cancellation.is_cancelled() {
+                break;
+            }
             let index = usize::try_from(scene_id.get())
                 .map_err(|_| SerialSnapshotRenderError::SceneCountOverflow)?;
             let request = self.requests.plan(snapshots[index].clone())?;
@@ -182,7 +219,7 @@ where
             preexisting,
             generated,
             self.total_scene_count,
-            false,
+            cancellation.is_cancelled(),
         ))
     }
 }
@@ -193,6 +230,9 @@ pub enum SerialSnapshotSimulationError {
     /// Snapshot corpus identity creation or compatibility failed.
     #[error(transparent)]
     CorpusOpen(#[from] SnapshotCorpusOpenError),
+    /// Environment provenance could not be persisted compatibly.
+    #[error(transparent)]
+    DatasetOpen(#[from] DatasetOpenError),
     /// Physics generation failed.
     #[error(transparent)]
     Physics(#[from] SceneGenerationError),

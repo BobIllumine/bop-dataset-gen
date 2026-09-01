@@ -8,7 +8,9 @@ use std::{
 };
 
 use bpp_core::{BackendInfo, BackendKind, SceneId};
-use bpp_dataset::{DatasetManifest, DatasetOpenError, DatasetResumeIndex};
+use bpp_dataset::{
+    DatasetManifest, DatasetOpenError, DatasetResumeIndex, RunEnvironment, persist_run_environment,
+};
 
 fn backend(version: &str) -> BackendInfo {
     BackendInfo::try_new(
@@ -111,6 +113,39 @@ fn resolved_config_is_atomically_persisted_and_must_match_manifest_bytes() {
     assert!(matches!(
         index.persist_resolved_config(root.path(), b"config-v2"),
         Err(DatasetOpenError::IncompatibleResolvedConfig)
+    ));
+}
+
+#[test]
+fn environment_provenance_is_canonical_and_resume_compatible() {
+    let root = tempfile::tempdir().unwrap();
+    let environment = RunEnvironment::try_new(
+        "0.1.0",
+        "macos",
+        "aarch64",
+        "release",
+        vec!["fast".to_owned(), "wgpu".to_owned()],
+    )
+    .unwrap();
+    persist_run_environment(root.path(), &environment).unwrap();
+    persist_run_environment(root.path(), &environment).unwrap();
+
+    let bytes = fs::read(root.path().join("environment.json")).unwrap();
+    assert!(bytes.ends_with(b"\n"));
+    let stored: RunEnvironment = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(stored, environment);
+
+    let changed = RunEnvironment::try_new(
+        "0.1.1",
+        "macos",
+        "aarch64",
+        "release",
+        vec!["fast".to_owned(), "wgpu".to_owned()],
+    )
+    .unwrap();
+    assert!(matches!(
+        persist_run_environment(root.path(), &changed),
+        Err(DatasetOpenError::IncompatibleEnvironment)
     ));
 }
 

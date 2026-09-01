@@ -50,6 +50,8 @@ pub fn validate_dataset(root: &Path) -> Result<DatasetValidationReport, DatasetV
     if crate::resume::fingerprint_config(&config) != manifest.resolved_config_fingerprint() {
         return Err(DatasetValidationError::ResolvedConfigFingerprint);
     }
+    let environment_path = root.join("environment.json");
+    let _: crate::RunEnvironment = read_json(&environment_path)?;
 
     let scenes_root = root.join("scenes");
     let entries = fs::read_dir(&scenes_root).map_err(|source| io_error(&scenes_root, source))?;
