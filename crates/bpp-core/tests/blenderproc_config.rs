@@ -8,7 +8,7 @@ use bpp_core::{BlenderProcRendererConfig, InvalidBlenderProcRendererConfigError}
 fn programmatic_blenderproc_config_is_checked_and_complete() {
     let config = BlenderProcRendererConfig::try_new(
         "blenderproc",
-        "workers/blenderproc_worker.py",
+        "tools/blenderproc-worker/blenderproc_worker.py",
         "AUTO",
         10.0,
         300.0,
@@ -18,7 +18,7 @@ fn programmatic_blenderproc_config_is_checked_and_complete() {
     assert_eq!(config.executable_path(), Path::new("blenderproc"));
     assert_eq!(
         config.worker_path(),
-        Path::new("workers/blenderproc_worker.py")
+        Path::new("tools/blenderproc-worker/blenderproc_worker.py")
     );
     assert_eq!(config.device_selection(), "AUTO");
     assert_eq!(config.handshake_timeout_s().to_bits(), 10.0_f32.to_bits());

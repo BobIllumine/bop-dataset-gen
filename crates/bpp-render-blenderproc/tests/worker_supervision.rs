@@ -210,7 +210,7 @@ print('BPP1\t{not-json', flush=True)
         let executable =
             std::env::var_os("BPP_BLENDERPROC_EXECUTABLE").unwrap_or_else(|| "blenderproc".into());
         let worker = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../workers/blenderproc_worker.py");
+            .join("../../tools/blenderproc-worker/blenderproc_worker.py");
         let config =
             BlenderProcRendererConfig::try_new(executable, worker, "CPU", 60.0, 300.0, 65_536)
                 .unwrap();

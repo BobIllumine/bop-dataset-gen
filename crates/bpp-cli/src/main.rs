@@ -737,7 +737,7 @@ fn doctor_blenderproc() -> ExitCode {
     let executable =
         std::env::var_os("BPP_BLENDERPROC_EXECUTABLE").unwrap_or_else(|| "blenderproc".into());
     let worker = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../workers/blenderproc_worker.py");
+        .join("../../tools/blenderproc-worker/blenderproc_worker.py");
     let config = bpp_core::BlenderProcRendererConfig::try_new(
         executable, worker, "AUTO", 30.0, 300.0, 65_536,
     )

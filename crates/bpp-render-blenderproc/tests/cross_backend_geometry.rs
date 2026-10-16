@@ -237,7 +237,8 @@ fn analytic_triangle_matches_wgpu_geometry_thresholds() {
 
     let executable =
         std::env::var_os("BPP_BLENDERPROC_EXECUTABLE").unwrap_or_else(|| "blenderproc".into());
-    let worker = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workers/blenderproc_worker.py");
+    let worker = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tools/blenderproc-worker/blenderproc_worker.py");
     let config =
         BlenderProcRendererConfig::try_new(executable, worker, "CPU", 60.0, 300.0, 65_536).unwrap();
     let mut blender = BlenderProcRenderer::try_new(config).unwrap();

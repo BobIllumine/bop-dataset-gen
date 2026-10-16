@@ -74,7 +74,7 @@ omit that field and advertise `timestamp_queries=false` in backend provenance.
 <executable_path> run <worker_path> -- --bpp-worker
 ```
 
-The worker is [workers/blenderproc_worker.py](../../workers/blenderproc_worker.py).
+The worker is [tools/blenderproc-worker/blenderproc_worker.py](../../tools/blenderproc-worker/blenderproc_worker.py).
 Worker replies use `BPP1<TAB>` followed by strict protocol-v1 JSON. The Rust
 supervisor treats other stdout lines emitted by the BlenderProc launcher as
 bounded diagnostics alongside stderr instead of mistaking them for replies.
