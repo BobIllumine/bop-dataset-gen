@@ -280,7 +280,8 @@ fn execute(command: Command) -> ExitCode {
             resume,
         } => generate(&config, renderer, &output, resume),
         Command::Validate { dataset } => validate(&dataset),
-        other => unavailable_command(&other),
+        Command::ExportBop { .. } => unavailable_command("export bop"),
+        Command::Bench { .. } => unavailable_command("bench"),
     }
 }
 
@@ -667,21 +668,8 @@ fn resolve_executable_path(base: &std::path::Path, configured: &std::path::Path)
     }
 }
 
-fn unavailable_command(command: &Command) -> ExitCode {
-    eprintln!(
-        "subcommand {} is recognized but its runtime is not available yet",
-        match command {
-            Command::PrepareAssets { .. } => "prepare-assets",
-            Command::Simulate { .. } => "simulate",
-            Command::Render { .. } => "render",
-            Command::Generate { .. } => "generate",
-            Command::ExportBop { .. } => "export bop",
-            Command::Bench { .. } => "bench",
-            Command::Doctor { .. } | Command::Schema | Command::Validate { .. } => {
-                unreachable!("implemented command")
-            }
-        }
-    );
+fn unavailable_command(name: &str) -> ExitCode {
+    eprintln!("subcommand {name} is recognized but its runtime is not available yet");
     ExitCode::from(3)
 }
 
