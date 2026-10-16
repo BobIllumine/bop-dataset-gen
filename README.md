@@ -11,3 +11,12 @@ runtime setup, output contracts, verification, and current limitations.
 
 Local development uses Rust 1.97.1. The repository-local `superpowers/`
 directory is planning material and remains ignored by Git.
+
+## License
+
+Copyright (C) 2026 BobIllumine
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See [LICENSE](LICENSE).
