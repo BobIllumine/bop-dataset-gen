@@ -9,7 +9,6 @@ mod render_error;
 mod render_reports;
 mod render_requests;
 mod run_config;
-mod run_config_wire;
 mod scenes;
 mod transforms;
 
@@ -70,5 +69,5 @@ pub use transforms::{
 #[cfg(feature = "schema")]
 #[must_use]
 pub fn run_config_json_schema() -> String {
-    run_config_wire::json_schema()
+    run_config::json_schema()
 }

@@ -29,6 +29,9 @@ bpp-render-api = { path = "../bpp-render-api" }
 bpp-render-wgpu = { path = "../bpp-render-wgpu", optional = true }
 bpp-render-blenderproc = { path = "../bpp-render-blenderproc", optional = true }
 serde_json = { version = "1" }
+toml = "1.1.4"
+tracing = "=0.1.41"
+tracing-subscriber = { version = "=0.3.20", default-features = false, features = ["env-filter", "fmt", "json", "std"] }
 
 [dev-dependencies]
 tempfile = "3"

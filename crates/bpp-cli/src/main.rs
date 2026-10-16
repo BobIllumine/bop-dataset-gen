@@ -14,6 +14,15 @@ fn main() -> ExitCode {
 }
 
 fn run(arguments: impl IntoIterator<Item = String>) -> ExitCode {
+    let mut arguments = arguments.into_iter().collect::<Vec<_>>();
+    let log_format = match take_log_format(&mut arguments) {
+        Ok(format) => format,
+        Err(message) => {
+            eprintln!("{message}\n{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    init_logging(log_format);
     match parse(arguments) {
         Ok(command) => execute(command),
         Err(message) => {
@@ -23,7 +32,104 @@ fn run(arguments: impl IntoIterator<Item = String>) -> ExitCode {
     }
 }
 
-const USAGE: &str = "usage: bpp doctor [--renderer wgpu|blenderproc|all]\n       bpp schema\n       bpp prepare-assets --config FILE\n       bpp simulate --config FILE --output CORPUS\n       bpp render --config FILE --snapshots CORPUS --renderer BACKEND --output DATASET\n       bpp generate --config FILE --renderer BACKEND --output DATASET [--resume]\n       bpp validate DATASET\n       bpp export bop DATASET --output DIRECTORY\n       bpp bench --config FILE --renderers BACKEND[,BACKEND] --output DIRECTORY";
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LogFormat {
+    Human,
+    Json,
+}
+
+/// Removes a leading `--log-format human|json` option.
+fn take_log_format(arguments: &mut Vec<String>) -> Result<LogFormat, String> {
+    if arguments.first().map(String::as_str) != Some("--log-format") {
+        return Ok(LogFormat::Human);
+    }
+    let format = match arguments.get(1).map(String::as_str) {
+        Some("human") => LogFormat::Human,
+        Some("json") => LogFormat::Json,
+        other => return Err(format!("--log-format must be human or json, not {other:?}")),
+    };
+    arguments.drain(..2);
+    Ok(format)
+}
+
+/// Sends logs to stderr, filtered by `BPP_LOG` (default `info`).
+///
+/// Stdout stays reserved for each command's machine-readable JSON result.
+fn init_logging(format: LogFormat) {
+    let filter = tracing_subscriber::EnvFilter::try_from_env("BPP_LOG")
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_target(false);
+    // Tests call `run` repeatedly in one process; only the first install wins.
+    let _ = match format {
+        LogFormat::Human => builder.without_time().try_init(),
+        LogFormat::Json => builder.json().try_init(),
+    };
+}
+
+/// Run-identity values the command line may override; each is written into
+/// the resolved configuration so provenance and resume see the real values.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct Overrides {
+    seed: Option<u64>,
+    scenes: Option<u32>,
+}
+
+impl Overrides {
+    fn parse(values: &BTreeMap<String, String>) -> Result<Self, String> {
+        let number = |flag: &str| {
+            values
+                .get(flag)
+                .map(|value| {
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| format!("{flag} must be a non-negative integer"))
+                })
+                .transpose()
+        };
+        let scenes = number("--scenes")?
+            .map(|value| u32::try_from(value).map_err(|_| "--scenes is too large".to_owned()))
+            .transpose()?;
+        Ok(Self {
+            seed: number("--seed")?,
+            scenes,
+        })
+    }
+
+    const fn is_empty(self) -> bool {
+        self.seed.is_none() && self.scenes.is_none()
+    }
+
+    /// Rewrites `[run]` in the configuration text with the overridden values.
+    fn apply(self, text: &str) -> Result<String, String> {
+        if self.is_empty() {
+            return Ok(text.to_owned());
+        }
+        let mut table = text
+            .parse::<toml::Table>()
+            .map_err(|error| format!("config is not valid TOML: {error}"))?;
+        let run = table
+            .get_mut("run")
+            .and_then(toml::Value::as_table_mut)
+            .ok_or_else(|| "config has no [run] table to override".to_owned())?;
+        if let Some(seed) = self.seed {
+            let seed = i64::try_from(seed)
+                .map_err(|_| "--seed must fit in a signed 64-bit TOML integer".to_owned())?;
+            run.insert("master_seed".to_owned(), toml::Value::Integer(seed));
+        }
+        if let Some(scenes) = self.scenes {
+            run.insert(
+                "valid_scene_count".to_owned(),
+                toml::Value::Integer(i64::from(scenes)),
+            );
+        }
+        toml::to_string(&table).map_err(|error| format!("cannot write resolved config: {error}"))
+    }
+}
+
+const USAGE: &str = "usage: bpp doctor [--renderer wgpu|blenderproc|all]\n       bpp schema\n       bpp prepare-assets --config FILE\n       bpp simulate --config FILE --output CORPUS [OVERRIDES]\n       bpp render --config FILE --snapshots CORPUS --renderer BACKEND --output DATASET [OVERRIDES]\n       bpp generate --config FILE --renderer BACKEND --output DATASET [--resume] [OVERRIDES]\n       bpp validate DATASET\n       bpp export bop DATASET --output DIRECTORY\n       bpp bench --config FILE --renderers BACKEND[,BACKEND] --output DIRECTORY\n\nOVERRIDES: --seed N --scenes N (written into the resolved config)\nGlobal: bpp [--log-format human|json] SUBCOMMAND; filter logs with BPP_LOG (default info)";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RendererSelection {
@@ -55,18 +161,21 @@ enum Command {
     Simulate {
         config: PathBuf,
         output: PathBuf,
+        overrides: Overrides,
     },
     Render {
         config: PathBuf,
         snapshots: PathBuf,
         renderer: RendererSelection,
         output: PathBuf,
+        overrides: Overrides,
     },
     Generate {
         config: PathBuf,
         renderer: RendererSelection,
         output: PathBuf,
         resume: bool,
+        overrides: Overrides,
     },
     Validate {
         dataset: PathBuf,
@@ -108,17 +217,26 @@ fn parse(arguments: impl IntoIterator<Item = impl Into<String>>) -> Result<Comma
             })
         }
         "simulate" => {
-            let options = parse_options(&rest, &["--config", "--output"], &[])?;
+            let options =
+                parse_options(&rest, &["--config", "--output", "--seed", "--scenes"], &[])?;
             ensure_no_flags(&options.flags)?;
             Ok(Command::Simulate {
                 config: required_path(&options.values, "--config")?,
                 output: required_path(&options.values, "--output")?,
+                overrides: Overrides::parse(&options.values)?,
             })
         }
         "render" => {
             let options = parse_options(
                 &rest,
-                &["--config", "--snapshots", "--renderer", "--output"],
+                &[
+                    "--config",
+                    "--snapshots",
+                    "--renderer",
+                    "--output",
+                    "--seed",
+                    "--scenes",
+                ],
                 &[],
             )?;
             ensure_no_flags(&options.flags)?;
@@ -127,12 +245,13 @@ fn parse(arguments: impl IntoIterator<Item = impl Into<String>>) -> Result<Comma
                 snapshots: required_path(&options.values, "--snapshots")?,
                 renderer: one_renderer(required(&options.values, "--renderer")?)?,
                 output: required_path(&options.values, "--output")?,
+                overrides: Overrides::parse(&options.values)?,
             })
         }
         "generate" => {
             let options = parse_options(
                 &rest,
-                &["--config", "--renderer", "--output"],
+                &["--config", "--renderer", "--output", "--seed", "--scenes"],
                 &["--resume"],
             )?;
             Ok(Command::Generate {
@@ -140,41 +259,46 @@ fn parse(arguments: impl IntoIterator<Item = impl Into<String>>) -> Result<Comma
                 renderer: one_renderer(required(&options.values, "--renderer")?)?,
                 output: required_path(&options.values, "--output")?,
                 resume: options.flags.contains("--resume"),
+                overrides: Overrides::parse(&options.values)?,
             })
         }
         "validate" if rest.len() == 1 => Ok(Command::Validate {
             dataset: PathBuf::from(&rest[0]),
         }),
-        "export" if rest.first().map(String::as_str) == Some("bop") => {
-            let dataset = rest
-                .get(1)
-                .filter(|value| !value.starts_with('-'))
-                .ok_or_else(|| "export bop requires DATASET".to_owned())?;
-            let options = parse_options(&rest[2..], &["--output"], &[])?;
-            ensure_no_flags(&options.flags)?;
-            Ok(Command::ExportBop {
-                dataset: PathBuf::from(dataset),
-                output: required_path(&options.values, "--output")?,
-            })
-        }
-        "bench" => {
-            let options = parse_options(&rest, &["--config", "--renderers", "--output"], &[])?;
-            ensure_no_flags(&options.flags)?;
-            let renderers = required(&options.values, "--renderers")?
-                .split(',')
-                .map(one_renderer)
-                .collect::<Result<Vec<_>, _>>()?;
-            if renderers.is_empty() {
-                return Err("--renderers must not be empty".to_owned());
-            }
-            Ok(Command::Bench {
-                config: required_path(&options.values, "--config")?,
-                renderers,
-                output: required_path(&options.values, "--output")?,
-            })
-        }
+        "export" if rest.first().map(String::as_str) == Some("bop") => parse_export_bop(&rest),
+        "bench" => parse_bench(&rest),
         _ => Err(format!("unknown or malformed subcommand {command:?}")),
     }
+}
+
+fn parse_export_bop(rest: &[String]) -> Result<Command, String> {
+    let dataset = rest
+        .get(1)
+        .filter(|value| !value.starts_with('-'))
+        .ok_or_else(|| "export bop requires DATASET".to_owned())?;
+    let options = parse_options(&rest[2..], &["--output"], &[])?;
+    ensure_no_flags(&options.flags)?;
+    Ok(Command::ExportBop {
+        dataset: PathBuf::from(dataset),
+        output: required_path(&options.values, "--output")?,
+    })
+}
+
+fn parse_bench(rest: &[String]) -> Result<Command, String> {
+    let options = parse_options(rest, &["--config", "--renderers", "--output"], &[])?;
+    ensure_no_flags(&options.flags)?;
+    let renderers = required(&options.values, "--renderers")?
+        .split(',')
+        .map(one_renderer)
+        .collect::<Result<Vec<_>, _>>()?;
+    if renderers.is_empty() {
+        return Err("--renderers must not be empty".to_owned());
+    }
+    Ok(Command::Bench {
+        config: required_path(&options.values, "--config")?,
+        renderers,
+        output: required_path(&options.values, "--output")?,
+    })
 }
 
 struct ParsedOptions {
@@ -266,19 +390,25 @@ fn execute(command: Command) -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::PrepareAssets { config } => prepare_assets(&config),
-        Command::Simulate { config, output } => simulate(&config, &output),
+        Command::Simulate {
+            config,
+            output,
+            overrides,
+        } => simulate(&config, &output, overrides),
         Command::Render {
             config,
             snapshots,
             renderer,
             output,
-        } => render(&config, &snapshots, renderer, &output),
+            overrides,
+        } => render(&config, &snapshots, renderer, &output, overrides),
         Command::Generate {
             config,
             renderer,
             output,
             resume,
-        } => generate(&config, renderer, &output, resume),
+            overrides,
+        } => generate(&config, renderer, &output, resume, overrides),
         Command::Validate { dataset } => validate(&dataset),
         Command::ExportBop { .. } => unavailable_command("export bop"),
         Command::Bench { .. } => unavailable_command("bench"),
@@ -298,14 +428,14 @@ fn validate(dataset: &std::path::Path) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("dataset validation failed: {error}");
+            tracing::error!("dataset validation failed: {error}");
             ExitCode::from(5)
         }
     }
 }
 
 fn prepare_assets(config_path: &std::path::Path) -> ExitCode {
-    let loaded = match load_run(config_path) {
+    let loaded = match load_run(config_path, Overrides::default()) {
         Ok(loaded) => loaded,
         Err(error) => return configuration_error(&error),
     };
@@ -321,7 +451,7 @@ fn prepare_assets(config_path: &std::path::Path) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("asset preparation failed: {error}");
+            tracing::error!("asset preparation failed: {error}");
             ExitCode::from(2)
         }
     }
@@ -333,13 +463,34 @@ struct LoadedRun {
     directory: PathBuf,
 }
 
-fn load_run(config_path: &std::path::Path) -> Result<LoadedRun, String> {
+fn load_run(config_path: &std::path::Path, overrides: Overrides) -> Result<LoadedRun, String> {
     let bytes = std::fs::read(config_path)
         .map_err(|error| format!("cannot read config {}: {error}", config_path.display()))?;
     let text = std::str::from_utf8(&bytes)
         .map_err(|error| format!("config {} is not UTF-8: {error}", config_path.display()))?;
-    let config = bpp_core::RunConfig::from_toml(text)
+    let resolved = overrides.apply(text).map_err(|error| {
+        format!(
+            "cannot apply overrides to {}: {error}",
+            config_path.display()
+        )
+    })?;
+    let config = bpp_core::RunConfig::from_toml(&resolved)
         .map_err(|error| format!("invalid config {}: {error}", config_path.display()))?;
+    let bytes = if overrides.is_empty() {
+        bytes
+    } else {
+        resolved.into_bytes()
+    };
+    let run = config.plan().run();
+    tracing::info!(
+        config = %config_path.display(),
+        seed = run.master_seed(),
+        scenes = run.valid_scene_count(),
+        simulation_workers = run.simulation_workers(),
+        renderer_workers = run.renderer_workers(),
+        overridden = !overrides.is_empty(),
+        "loaded run configuration"
+    );
     let directory = config_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
@@ -352,12 +503,16 @@ fn load_run(config_path: &std::path::Path) -> Result<LoadedRun, String> {
 }
 
 fn configuration_error(message: &str) -> ExitCode {
-    eprintln!("{message}");
+    tracing::error!("{message}");
     ExitCode::from(2)
 }
 
-fn simulate(config_path: &std::path::Path, output: &std::path::Path) -> ExitCode {
-    let loaded = match load_run(config_path) {
+fn simulate(
+    config_path: &std::path::Path,
+    output: &std::path::Path,
+    overrides: Overrides,
+) -> ExitCode {
+    let loaded = match load_run(config_path, overrides) {
         Ok(loaded) => loaded,
         Err(error) => return configuration_error(&error),
     };
@@ -404,7 +559,7 @@ fn simulate(config_path: &std::path::Path, output: &std::path::Path) -> ExitCode
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("simulation did not produce the requested corpus: {error}");
+            tracing::error!("simulation did not produce the requested corpus: {error}");
             ExitCode::from(4)
         }
     }
@@ -415,8 +570,9 @@ fn render(
     snapshots: &std::path::Path,
     renderer: RendererSelection,
     output: &std::path::Path,
+    overrides: Overrides,
 ) -> ExitCode {
-    let loaded = match load_run(config_path) {
+    let loaded = match load_run(config_path, overrides) {
         Ok(loaded) => loaded,
         Err(error) => return configuration_error(&error),
     };
@@ -439,8 +595,9 @@ fn generate(
     renderer: RendererSelection,
     output: &std::path::Path,
     resume: bool,
+    overrides: Overrides,
 ) -> ExitCode {
-    let loaded = match load_run(config_path) {
+    let loaded = match load_run(config_path, overrides) {
         Ok(loaded) => loaded,
         Err(error) => return configuration_error(&error),
     };
@@ -471,8 +628,10 @@ fn render_wgpu(
     snapshots: &std::path::Path,
     output: &std::path::Path,
 ) -> ExitCode {
-    match bpp_render_wgpu::WgpuRenderer::try_new(loaded.config.plan().renderers().wgpu()) {
-        Ok(renderer) => run_render(loaded, prepared, snapshots, output, renderer),
+    match renderer_pool(loaded, || {
+        bpp_render_wgpu::WgpuRenderer::try_new(loaded.config.plan().renderers().wgpu())
+    }) {
+        Ok(renderers) => run_render(loaded, prepared, snapshots, output, renderers),
         Err(error) => unavailable(format!("wgpu unavailable: {error}")),
     }
 }
@@ -494,9 +653,10 @@ fn render_blenderproc(
     snapshots: &std::path::Path,
     output: &std::path::Path,
 ) -> ExitCode {
-    let config = resolved_blenderproc_config(loaded);
-    match bpp_render_blenderproc::BlenderProcRenderer::try_new(config) {
-        Ok(renderer) => run_render(loaded, prepared, snapshots, output, renderer),
+    match renderer_pool(loaded, || {
+        bpp_render_blenderproc::BlenderProcRenderer::try_new(resolved_blenderproc_config(loaded))
+    }) {
+        Ok(renderers) => run_render(loaded, prepared, snapshots, output, renderers),
         Err(error) => unavailable(format!("BlenderProc unavailable: {error}")),
     }
 }
@@ -511,27 +671,39 @@ fn render_blenderproc(
     unavailable("BlenderProc is unavailable in this build")
 }
 
+#[cfg(any(feature = "wgpu", feature = "blenderproc"))]
 fn run_render<R>(
     loaded: &LoadedRun,
     prepared: &bpp_pipeline::PreparedAssetCatalog,
     snapshots: &std::path::Path,
     output: &std::path::Path,
-    renderer: R,
+    mut renderers: Vec<R>,
 ) -> ExitCode
 where
     R: bpp_render_api::Renderer,
 {
-    let mut pipeline =
-        bpp_pipeline::SerialSnapshotRenderer::new(loaded.config.plan(), renderer, output);
-    match pipeline.run_to_completion(&loaded.bytes, prepared.visual_assets(), snapshots) {
+    let plan = loaded.config.plan();
+    let catalog = prepared.visual_assets();
+    let result = if renderers.len() > 1 {
+        bpp_pipeline::ParallelSnapshotRenderer::try_new(plan, renderers, output)
+            .and_then(|mut pipeline| pipeline.run_to_completion(&loaded.bytes, catalog, snapshots))
+    } else {
+        let renderer = renderers
+            .pop()
+            .expect("renderer_pool builds at least one renderer");
+        bpp_pipeline::SerialSnapshotRenderer::new(plan, renderer, output).run_to_completion(
+            &loaded.bytes,
+            catalog,
+            snapshots,
+        )
+    };
+    match result {
         Ok(report) => print_run_report(report),
         Err(error) => {
-            eprintln!("render failed: {error}");
+            tracing::error!("render failed: {error}");
             match error {
-                bpp_pipeline::SerialSnapshotRenderError::Render(_)
-                | bpp_pipeline::SerialSnapshotRenderError::RendererLifecycle(_) => {
-                    ExitCode::from(6)
-                }
+                bpp_pipeline::SnapshotRenderError::Render(_)
+                | bpp_pipeline::SnapshotRenderError::RendererLifecycle(_) => ExitCode::from(6),
                 _ => ExitCode::from(5),
             }
         }
@@ -544,8 +716,10 @@ fn generate_wgpu(
     prepared: &bpp_pipeline::PreparedAssetCatalog,
     output: &std::path::Path,
 ) -> ExitCode {
-    match bpp_render_wgpu::WgpuRenderer::try_new(loaded.config.plan().renderers().wgpu()) {
-        Ok(renderer) => run_generate(loaded, prepared, output, renderer),
+    match renderer_pool(loaded, || {
+        bpp_render_wgpu::WgpuRenderer::try_new(loaded.config.plan().renderers().wgpu())
+    }) {
+        Ok(renderers) => run_generate(loaded, prepared, output, renderers),
         Err(error) => unavailable(format!("wgpu unavailable: {error}")),
     }
 }
@@ -565,9 +739,10 @@ fn generate_blenderproc(
     prepared: &bpp_pipeline::PreparedAssetCatalog,
     output: &std::path::Path,
 ) -> ExitCode {
-    match bpp_render_blenderproc::BlenderProcRenderer::try_new(resolved_blenderproc_config(loaded))
-    {
-        Ok(renderer) => run_generate(loaded, prepared, output, renderer),
+    match renderer_pool(loaded, || {
+        bpp_render_blenderproc::BlenderProcRenderer::try_new(resolved_blenderproc_config(loaded))
+    }) {
+        Ok(renderers) => run_generate(loaded, prepared, output, renderers),
         Err(error) => unavailable(format!("BlenderProc unavailable: {error}")),
     }
 }
@@ -581,26 +756,30 @@ fn generate_blenderproc(
     unavailable("BlenderProc is unavailable in this build")
 }
 
+#[cfg(any(feature = "wgpu", feature = "blenderproc"))]
 fn run_generate<R>(
     loaded: &LoadedRun,
     prepared: &bpp_pipeline::PreparedAssetCatalog,
     output: &std::path::Path,
-    renderer: R,
+    mut renderers: Vec<R>,
 ) -> ExitCode
 where
     R: bpp_render_api::Renderer,
 {
     let plan = loaded.config.plan();
     let catalog = prepared.visual_assets();
-    let result = if plan.run().simulation_workers() > 1 {
+    let result = if plan.run().simulation_workers() > 1 || renderers.len() > 1 {
         bpp_pipeline::ParallelGenerationPipeline::try_new(
             plan,
             prepared.shared_physics_assets(),
-            renderer,
+            renderers,
             output,
         )
         .map(|mut pipeline| pipeline.run_to_completion(&loaded.bytes, catalog))
     } else {
+        let renderer = renderers
+            .pop()
+            .expect("renderer_pool builds at least one renderer");
         bpp_pipeline::SerialGenerationPipeline::try_new(
             plan,
             prepared.shared_physics_assets(),
@@ -616,27 +795,37 @@ where
     match result {
         Ok(report) => print_run_report(report),
         Err(error) => {
-            eprintln!("generation failed: {error}");
+            tracing::error!("generation failed: {error}");
             match error {
-                bpp_pipeline::SerialGenerationPipelineError::Physics(_)
-                | bpp_pipeline::SerialGenerationPipelineError::ParallelPhysics(_) => {
-                    ExitCode::from(4)
-                }
-                bpp_pipeline::SerialGenerationPipelineError::InvalidExecutor(_) => {
-                    ExitCode::from(2)
-                }
-                bpp_pipeline::SerialGenerationPipelineError::Render(_)
-                | bpp_pipeline::SerialGenerationPipelineError::RendererLifecycle(_) => {
-                    ExitCode::from(6)
-                }
-                bpp_pipeline::SerialGenerationPipelineError::Request(_) => ExitCode::from(2),
+                bpp_pipeline::GenerationPipelineError::Physics(_)
+                | bpp_pipeline::GenerationPipelineError::ParallelPhysics(_) => ExitCode::from(4),
+                bpp_pipeline::GenerationPipelineError::Render(_)
+                | bpp_pipeline::GenerationPipelineError::RendererLifecycle(_) => ExitCode::from(6),
+                bpp_pipeline::GenerationPipelineError::InvalidExecutor(_)
+                | bpp_pipeline::GenerationPipelineError::RendererPool(_)
+                | bpp_pipeline::GenerationPipelineError::Request(_) => ExitCode::from(2),
                 _ => ExitCode::from(5),
             }
         }
     }
 }
 
-fn print_run_report(report: bpp_pipeline::SerialRunReport) -> ExitCode {
+/// Builds one renderer per configured render worker.
+#[cfg(any(feature = "wgpu", feature = "blenderproc"))]
+fn renderer_pool<R, E>(loaded: &LoadedRun, make: impl Fn() -> Result<R, E>) -> Result<Vec<R>, E> {
+    let count = loaded.config.plan().run().renderer_workers().max(1);
+    (0..count).map(|_| make()).collect()
+}
+
+#[cfg(any(feature = "wgpu", feature = "blenderproc"))]
+fn print_run_report(report: bpp_pipeline::RunReport) -> ExitCode {
+    tracing::info!(
+        preexisting_scenes = report.preexisting_scene_count(),
+        generated_scenes = report.generated_scene_count(),
+        total_scenes = report.total_scene_count(),
+        cancelled = report.was_cancelled(),
+        "run finished"
+    );
     println!(
         "{}",
         serde_json::json!({
@@ -650,7 +839,7 @@ fn print_run_report(report: bpp_pipeline::SerialRunReport) -> ExitCode {
 }
 
 fn unavailable(message: impl std::fmt::Display) -> ExitCode {
-    eprintln!("{message}");
+    tracing::error!("{message}");
     ExitCode::from(3)
 }
 
@@ -692,7 +881,7 @@ fn resolve_executable_path(base: &std::path::Path, configured: &std::path::Path)
 }
 
 fn unavailable_command(name: &str) -> ExitCode {
-    eprintln!("subcommand {name} is recognized but its runtime is not available yet");
+    tracing::error!("subcommand {name} is recognized but its runtime is not available yet");
     ExitCode::from(3)
 }
 
@@ -701,7 +890,7 @@ fn doctor(renderer: &str) -> ExitCode {
         "wgpu" => doctor_wgpu(),
         "blenderproc" => doctor_blenderproc(),
         _ => {
-            eprintln!("renderer {renderer:?} is unavailable in this build");
+            tracing::error!("renderer {renderer:?} is unavailable in this build");
             ExitCode::from(3)
         }
     }
@@ -731,7 +920,7 @@ fn doctor_wgpu() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("wgpu unavailable: {error}");
+            tracing::error!("wgpu unavailable: {error}");
             ExitCode::from(3)
         }
     }
@@ -739,16 +928,36 @@ fn doctor_wgpu() -> ExitCode {
 
 #[cfg(not(feature = "wgpu"))]
 fn doctor_wgpu() -> ExitCode {
-    eprintln!("renderer \"wgpu\" is unavailable in this build");
+    tracing::error!("renderer \"wgpu\" is unavailable in this build");
     ExitCode::from(3)
+}
+
+/// Finds the `BlenderProc` worker script for `doctor`, which has no run config.
+///
+/// Order: `BPP_BLENDERPROC_WORKER`, then `blenderproc-worker/` beside the
+/// executable (the release archive layout), then this source checkout.
+#[cfg(feature = "blenderproc")]
+fn default_worker_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("BPP_BLENDERPROC_WORKER") {
+        return PathBuf::from(path);
+    }
+    let bundled = std::env::current_exe().ok().and_then(|executable| {
+        executable
+            .parent()
+            .map(|directory| directory.join("blenderproc-worker/blenderproc_worker.py"))
+    });
+    match bundled {
+        Some(path) if path.is_file() => path,
+        _ => std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/blenderproc-worker/blenderproc_worker.py"),
+    }
 }
 
 #[cfg(feature = "blenderproc")]
 fn doctor_blenderproc() -> ExitCode {
     let executable =
         std::env::var_os("BPP_BLENDERPROC_EXECUTABLE").unwrap_or_else(|| "blenderproc".into());
-    let worker = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tools/blenderproc-worker/blenderproc_worker.py");
+    let worker = default_worker_path();
     let config = bpp_core::BlenderProcRendererConfig::try_new(
         executable, worker, "AUTO", 30.0, 300.0, 65_536,
     )
@@ -768,7 +977,7 @@ fn doctor_blenderproc() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("BlenderProc unavailable: {error}");
+            tracing::error!("BlenderProc unavailable: {error}");
             ExitCode::from(3)
         }
     }
@@ -776,7 +985,7 @@ fn doctor_blenderproc() -> ExitCode {
 
 #[cfg(not(feature = "blenderproc"))]
 fn doctor_blenderproc() -> ExitCode {
-    eprintln!("renderer \"blenderproc\" is unavailable in this build");
+    tracing::error!("renderer \"blenderproc\" is unavailable in this build");
     ExitCode::from(3)
 }
 
@@ -786,7 +995,59 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    use super::{Command, RendererSelection, parse, run};
+    use super::{Command, LogFormat, Overrides, RendererSelection, parse, run, take_log_format};
+
+    #[test]
+    fn run_identity_overrides_parse_and_rewrite_the_run_table() {
+        let Ok(Command::Simulate { overrides, .. }) = parse([
+            "simulate", "--config", "run.toml", "--output", "corpus", "--seed", "42", "--scenes",
+            "7",
+        ]) else {
+            panic!("simulate with overrides parses");
+        };
+        assert_eq!(
+            overrides,
+            Overrides {
+                seed: Some(42),
+                scenes: Some(7)
+            }
+        );
+        let rewritten = overrides
+            .apply("[run]\nmaster_seed = 1\nvalid_scene_count = 2\n")
+            .unwrap();
+        assert!(rewritten.contains("master_seed = 42"));
+        assert!(rewritten.contains("valid_scene_count = 7"));
+        assert_eq!(
+            Overrides::default()
+                .apply("[run] # kept verbatim\n")
+                .unwrap(),
+            "[run] # kept verbatim\n"
+        );
+        assert!(
+            Overrides {
+                seed: Some(u64::MAX),
+                scenes: None
+            }
+            .apply("[run]\n")
+            .is_err()
+        );
+        assert!(parse(["simulate", "--config", "c", "--output", "o", "--seed", "-1"]).is_err());
+    }
+
+    #[test]
+    fn a_leading_log_format_option_is_consumed() {
+        let mut arguments = vec![
+            "--log-format".to_owned(),
+            "json".to_owned(),
+            "schema".to_owned(),
+        ];
+        assert_eq!(take_log_format(&mut arguments), Ok(LogFormat::Json));
+        assert_eq!(arguments, vec!["schema".to_owned()]);
+        let mut arguments = vec!["schema".to_owned()];
+        assert_eq!(take_log_format(&mut arguments), Ok(LogFormat::Human));
+        let mut arguments = vec!["--log-format".to_owned(), "xml".to_owned()];
+        assert!(take_log_format(&mut arguments).is_err());
+    }
 
     #[test]
     fn every_documented_subcommand_has_one_unambiguous_parse_shape() {
@@ -808,7 +1069,8 @@ mod tests {
             parse(["simulate", "--config", "run.toml", "--output", "corpus"]),
             Ok(Command::Simulate {
                 config: PathBuf::from("run.toml"),
-                output: PathBuf::from("corpus")
+                output: PathBuf::from("corpus"),
+                overrides: Overrides::default()
             })
         );
         assert_eq!(
@@ -827,7 +1089,8 @@ mod tests {
                 config: PathBuf::from("run.toml"),
                 snapshots: PathBuf::from("corpus"),
                 renderer: RendererSelection::Wgpu,
-                output: PathBuf::from("dataset")
+                output: PathBuf::from("dataset"),
+                overrides: Overrides::default()
             })
         );
         assert_eq!(
@@ -845,7 +1108,8 @@ mod tests {
                 config: PathBuf::from("run.toml"),
                 renderer: RendererSelection::BlenderProc,
                 output: PathBuf::from("dataset"),
-                resume: true
+                resume: true,
+                overrides: Overrides::default()
             })
         );
         assert_eq!(

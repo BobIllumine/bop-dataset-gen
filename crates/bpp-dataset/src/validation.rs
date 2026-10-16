@@ -635,9 +635,9 @@ fn write_checksums(
     let mut bytes = serde_json::to_vec(&manifest)?;
     bytes.push(b'\n');
     let mut file = File::create(&path).map_err(|source| io_error(&path, source))?;
+    // Made durable together with the rest of the scene by `SceneStagingArea::commit`.
     file.write_all(&bytes)
         .map_err(|source| io_error(&path, source))?;
-    file.sync_all().map_err(|source| io_error(&path, source))?;
     Ok(path)
 }
 

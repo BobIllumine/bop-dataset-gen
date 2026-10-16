@@ -9,7 +9,7 @@ use std::{
 };
 
 use bpp_core::{AssetId, RunPlan, SceneId, SceneSnapshot};
-use bpp_physics_rapier::{PreparedPhysicsAsset, SerialPhysicsGenerator};
+use bpp_physics_rapier::{PreparedPhysicsAsset, SceneGenerationError, SerialPhysicsGenerator};
 use crossbeam_channel::{Receiver, Sender};
 use thiserror::Error;
 
@@ -219,6 +219,7 @@ fn run_worker<F: SimulatorFactory>(
             return Ok(());
         }
         let snapshot = simulator.simulate(scene_id)?;
+        tracing::debug!(scene = scene_id.get(), "simulated scene");
         sender
             .send(snapshot)
             .map_err(|_| PipelineError::ReceiverDropped)?;
@@ -253,7 +254,7 @@ impl SimulatorFactory for RapierSimulatorFactory {
     fn create(&self) -> Result<Self::Simulator, PipelineError> {
         SerialPhysicsGenerator::try_new(&self.plan, self.prepared_assets.clone())
             .map(RapierSimulator)
-            .map_err(|error| PipelineError::Simulator(error.to_string()))
+            .map_err(PipelineError::from)
     }
 }
 
@@ -262,9 +263,7 @@ pub struct RapierSimulator(SerialPhysicsGenerator);
 
 impl PhysicsSimulator for RapierSimulator {
     fn simulate(&mut self, scene_id: SceneId) -> Result<SceneSnapshot, PipelineError> {
-        self.0
-            .generate_scene(scene_id)
-            .map_err(|error| PipelineError::Simulator(error.to_string()))
+        self.0.generate_scene(scene_id).map_err(PipelineError::from)
     }
 }
 
@@ -310,9 +309,12 @@ impl PhysicsStageReport {
 }
 
 /// Fatal failure propagated by the parallel physics stage.
-#[derive(Clone, Debug, Eq, Error, PartialEq)]
+#[derive(Debug, Error)]
 pub enum PipelineError {
-    /// A worker-local simulator failed.
+    /// The Rapier generator failed to build its world or produce a scene.
+    #[error(transparent)]
+    Physics(#[from] SceneGenerationError),
+    /// A custom [`PhysicsSimulator`] failed.
     #[error("physics simulator failed: {0}")]
     Simulator(String),
     /// The downstream receiver disappeared before generation completed.

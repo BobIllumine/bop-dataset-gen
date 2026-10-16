@@ -9,6 +9,8 @@ use bpp_core::{SceneId, SceneSnapshot};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::durability::{DurabilityError, DurableBatch, sync_now};
+
 static NEXT_SNAPSHOT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 static NEXT_CORPUS_MANIFEST_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 const CORPUS_MANIFEST_SCHEMA_VERSION: u32 = 1;
@@ -175,52 +177,105 @@ pub fn write_scene_snapshot(
     corpus_root: &Path,
     scene: &SceneSnapshot,
 ) -> Result<PathBuf, SnapshotCorpusError> {
+    write_scene_snapshots(corpus_root, std::slice::from_ref(scene))?
+        .pop()
+        .ok_or_else(|| SnapshotCorpusError::Io {
+            path: corpus_root.to_owned(),
+            source: io::Error::other("a one-scene batch published nothing"),
+        })
+}
+
+/// Atomically publishes a batch of scenes with a single storage flush.
+///
+/// Each scene is still published by its own atomic rename, and every
+/// snapshot's data is durable before any rename. A rename becomes durable with
+/// the next batch or [`sync_snapshot_index`]; a rename lost to power failure
+/// only means that scene is regenerated on resume. Returns the published
+/// directories in input order.
+///
+/// # Errors
+///
+/// Returns a typed serialization, collision, or filesystem error. Scenes
+/// renamed before the error stay published; existing output is never replaced.
+pub fn write_scene_snapshots(
+    corpus_root: &Path,
+    scenes: &[SceneSnapshot],
+) -> Result<Vec<PathBuf>, SnapshotCorpusError> {
     let staging_root = corpus_root.join(".staging");
     let scenes_root = corpus_root.join("scenes");
     create_dir_all(&staging_root)?;
     create_dir_all(&scenes_root)?;
-    let destination = scenes_root.join(format!("{:020}", scene.scene_id().get()));
-    if destination.exists() {
-        return Err(SnapshotCorpusError::DestinationExists {
-            scene_id: scene.scene_id(),
-        });
-    }
 
-    let temporary = create_temporary_directory(&staging_root, scene.scene_id())?;
+    let mut staged = Vec::with_capacity(scenes.len());
     let result = (|| {
-        let path = temporary.join("scene.json");
-        let mut bytes = serde_json::to_vec(scene).map_err(SnapshotCorpusError::Serialize)?;
-        bytes.push(b'\n');
-        let mut file = File::create(&path).map_err(|source| SnapshotCorpusError::Io {
-            path: path.clone(),
-            source,
-        })?;
-        file.write_all(&bytes)
-            .and_then(|()| file.sync_all())
-            .map_err(|source| SnapshotCorpusError::Io {
-                path: path.clone(),
-                source,
-            })?;
-        sync_directory(&temporary)?;
-        fs::rename(&temporary, &destination).map_err(|source| {
-            if source.kind() == io::ErrorKind::AlreadyExists || destination.exists() {
-                SnapshotCorpusError::DestinationExists {
+        let mut batch = DurableBatch::default();
+        for scene in scenes {
+            let destination = scenes_root.join(format!("{:020}", scene.scene_id().get()));
+            if destination.exists() {
+                return Err(SnapshotCorpusError::DestinationExists {
                     scene_id: scene.scene_id(),
-                }
-            } else {
-                SnapshotCorpusError::Io {
-                    path: destination.clone(),
-                    source,
-                }
+                });
             }
-        })?;
-        sync_directory(&scenes_root)?;
-        Ok(destination.clone())
+            let temporary = create_temporary_directory(&staging_root, scene.scene_id())?;
+            staged.push((scene.scene_id(), temporary.clone(), destination));
+            let path = temporary.join("scene.json");
+            let mut bytes = serde_json::to_vec(scene).map_err(SnapshotCorpusError::Serialize)?;
+            bytes.push(b'\n');
+            File::create(&path)
+                .and_then(|mut file| file.write_all(&bytes))
+                .map_err(|source| SnapshotCorpusError::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+            batch.add_tree(&temporary).map_err(durability_error)?;
+        }
+        batch.add(&scenes_root).map_err(durability_error)?;
+        batch.flush().map_err(durability_error)?;
+
+        let mut published = Vec::with_capacity(staged.len());
+        for (scene_id, temporary, destination) in staged.drain(..) {
+            if let Err(source) = fs::rename(&temporary, &destination) {
+                let _ = fs::remove_dir_all(&temporary);
+                return Err(
+                    if source.kind() == io::ErrorKind::AlreadyExists || destination.exists() {
+                        SnapshotCorpusError::DestinationExists { scene_id }
+                    } else {
+                        SnapshotCorpusError::Io {
+                            path: destination,
+                            source,
+                        }
+                    },
+                );
+            }
+            published.push(destination);
+        }
+        DurableBatch::default()
+            .add(&scenes_root)
+            .map_err(durability_error)?;
+        Ok(published)
     })();
-    if result.is_err() {
-        let _ = fs::remove_dir_all(&temporary);
+    for (_, temporary, _) in staged {
+        let _ = fs::remove_dir_all(temporary);
     }
     result
+}
+
+/// Makes every published snapshot's rename durable.
+///
+/// Call once at the end of a run; each batch already makes its own data durable.
+///
+/// # Errors
+///
+/// Returns the filesystem error from flushing the corpus scene directory.
+pub fn sync_snapshot_index(corpus_root: &Path) -> Result<(), SnapshotCorpusError> {
+    sync_now(&corpus_root.join("scenes")).map_err(durability_error)
+}
+
+fn durability_error(error: DurabilityError) -> SnapshotCorpusError {
+    SnapshotCorpusError::Io {
+        path: error.path,
+        source: error.source,
+    }
 }
 
 /// Reads a snapshot corpus in ascending scene-ID order.
@@ -439,15 +494,6 @@ fn create_dir_all(path: &Path) -> Result<(), SnapshotCorpusError> {
         path: path.to_owned(),
         source,
     })
-}
-
-fn sync_directory(path: &Path) -> Result<(), SnapshotCorpusError> {
-    File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|source| SnapshotCorpusError::Io {
-            path: path.to_owned(),
-            source,
-        })
 }
 
 fn parse_scene_id(name: &str) -> Option<SceneId> {

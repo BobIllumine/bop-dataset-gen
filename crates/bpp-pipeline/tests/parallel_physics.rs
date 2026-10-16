@@ -243,7 +243,7 @@ fn dropping_the_receiver_stops_every_worker() {
         physics.join().unwrap()
     });
 
-    assert_eq!(result, Err(PipelineError::ReceiverDropped));
+    assert!(matches!(result, Err(PipelineError::ReceiverDropped)));
     assert!(cancellation.is_cancelled());
     assert!(factory.counters.simulated.load(Ordering::SeqCst) < 1_000);
 }
@@ -256,9 +256,8 @@ fn a_simulator_error_is_returned_and_cancels_the_run() {
 
     let (result, seen) = run_collecting(executor, &scene_ids(500), &factory, &cancellation);
 
-    assert_eq!(
-        result,
-        Err(PipelineError::Simulator("scene 7 exploded".to_owned()))
+    assert!(
+        matches!(result, Err(PipelineError::Simulator(message)) if message == "scene 7 exploded")
     );
     assert!(cancellation.is_cancelled());
     assert!(!seen.contains(&7));
@@ -273,7 +272,7 @@ fn a_worker_panic_is_caught_and_every_worker_joins() {
 
     let (result, seen) = run_collecting(executor, &scene_ids(500), &factory, &cancellation);
 
-    assert_eq!(result, Err(PipelineError::WorkerPanicked));
+    assert!(matches!(result, Err(PipelineError::WorkerPanicked)));
     assert!(cancellation.is_cancelled());
     assert!(!seen.contains(&3));
 }
@@ -291,9 +290,8 @@ fn a_factory_error_is_returned() {
         &CancellationToken::new(),
     );
 
-    assert_eq!(
-        result,
-        Err(PipelineError::Simulator("cannot build world".to_owned()))
+    assert!(
+        matches!(result, Err(PipelineError::Simulator(message)) if message == "cannot build world")
     );
     assert!(seen.is_empty());
 }
@@ -392,4 +390,11 @@ fn rapier_output_does_not_depend_on_worker_count() {
 
     assert_eq!(rapier_scenes(&plan, 1), oracle);
     assert_eq!(rapier_scenes(&plan, 4), oracle);
+}
+
+#[test]
+fn rapier_failures_keep_their_typed_physics_error() {
+    let plan = fixture_plan(1);
+    let factory = RapierSimulatorFactory::new(plan, BTreeMap::new());
+    assert!(matches!(factory.create(), Err(PipelineError::Physics(_))));
 }

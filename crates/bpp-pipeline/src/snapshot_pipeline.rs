@@ -5,11 +5,12 @@ use std::{
 };
 
 use bpp_assets::ResolvedAssetCatalog;
-use bpp_core::{AssetId, RenderError, RunPlan, SceneId};
+use bpp_core::{AssetId, BackendInfo, RenderError, RunPlan, SceneId, SceneSnapshot};
 use bpp_dataset::{
     DatasetManifest, DatasetManifestError, DatasetOpenError, DatasetResumeIndex,
     SnapshotCorpusError, SnapshotCorpusOpenError, open_snapshot_corpus, persist_run_environment,
-    read_run_environment, read_snapshot_corpus, validate_snapshot_corpus, write_scene_snapshot,
+    read_run_environment, read_snapshot_corpus, sync_scene_index, sync_snapshot_index,
+    validate_snapshot_corpus, write_scene_snapshot,
 };
 use bpp_physics_rapier::{PreparedPhysicsAsset, SceneGenerationError, SerialPhysicsGenerator};
 use bpp_render_api::Renderer;
@@ -17,8 +18,8 @@ use thiserror::Error;
 
 use crate::{
     CancellationToken, InvalidParallelPhysicsExecutor, PipelineError, PipelineRenderError,
-    RenderRequestPlanner, RenderRequestPlanningError, SerialDatasetRenderer, SerialRunReport,
-    current_run_environment,
+    RenderRequestPlanner, RenderRequestPlanningError, RendererPoolError, RunReport,
+    SerialDatasetRenderer, current_run_environment,
 };
 
 /// Serial physics-only executor that atomically publishes renderer-neutral scene snapshots.
@@ -57,7 +58,7 @@ impl SerialSnapshotSimulator {
         asset_catalog_fingerprint: &str,
         corpus_root: &Path,
         cancellation: &CancellationToken,
-    ) -> Result<SerialRunReport, SerialSnapshotSimulationError> {
+    ) -> Result<RunReport, SnapshotSimulationError> {
         let (preexisting_scene_count, existing) = open_simulation_corpus(
             resolved_config_bytes,
             asset_catalog_fingerprint,
@@ -77,7 +78,8 @@ impl SerialSnapshotSimulator {
             write_scene_snapshot(corpus_root, &scene)?;
             generated_scene_count += 1;
         }
-        Ok(SerialRunReport::new(
+        sync_snapshot_index(corpus_root)?;
+        Ok(RunReport::new(
             preexisting_scene_count,
             generated_scene_count,
             self.total_scene_count,
@@ -94,7 +96,7 @@ pub(crate) fn open_simulation_corpus(
     asset_catalog_fingerprint: &str,
     corpus_root: &Path,
     total_scene_count: u64,
-) -> Result<(u64, BTreeSet<SceneId>), SerialSnapshotSimulationError> {
+) -> Result<(u64, BTreeSet<SceneId>), SnapshotSimulationError> {
     open_snapshot_corpus(
         corpus_root,
         resolved_config_bytes,
@@ -109,16 +111,76 @@ pub(crate) fn open_simulation_corpus(
     };
     for scene in &existing {
         if scene.scene_id().get() >= total_scene_count {
-            return Err(SerialSnapshotSimulationError::SceneOutsideRun {
+            return Err(SnapshotSimulationError::SceneOutsideRun {
                 scene_id: scene.scene_id(),
                 total_scene_count,
             });
         }
     }
-    let preexisting_scene_count = u64::try_from(existing.len())
-        .map_err(|_| SerialSnapshotSimulationError::SceneCountOverflow)?;
+    let preexisting_scene_count =
+        u64::try_from(existing.len()).map_err(|_| SnapshotSimulationError::SceneCountOverflow)?;
     let existing = existing.into_iter().map(|scene| scene.scene_id()).collect();
+    tracing::info!(
+        corpus = %corpus_root.display(),
+        total_scenes = total_scene_count,
+        preexisting_scenes = preexisting_scene_count,
+        "opened snapshot corpus"
+    );
     Ok((preexisting_scene_count, existing))
+}
+
+/// Validates a complete snapshot corpus and opens or resumes the dataset it renders into.
+///
+/// Returns every snapshot in scene-ID order, the resume index, and the number
+/// of scenes committed before this run.
+pub(crate) fn open_render_run(
+    snapshot_root: &Path,
+    dataset_root: &Path,
+    resolved_config_bytes: &[u8],
+    catalog: &ResolvedAssetCatalog,
+    backend: BackendInfo,
+    total_scene_count: u64,
+) -> Result<(Vec<SceneSnapshot>, DatasetResumeIndex, u64), SnapshotRenderError> {
+    validate_snapshot_corpus(
+        snapshot_root,
+        resolved_config_bytes,
+        catalog.fingerprint(),
+        total_scene_count,
+    )?;
+    let _producer_environment = read_run_environment(snapshot_root)?;
+    let snapshots = read_snapshot_corpus(snapshot_root)?;
+    let found =
+        u64::try_from(snapshots.len()).map_err(|_| SnapshotRenderError::SceneCountOverflow)?;
+    if found != total_scene_count
+        || snapshots
+            .iter()
+            .enumerate()
+            .any(|(index, scene)| scene.scene_id().get() != index as u64)
+    {
+        return Err(SnapshotRenderError::IncompleteSnapshotCorpus {
+            expected: total_scene_count,
+            found,
+        });
+    }
+    let manifest = DatasetManifest::try_new(
+        resolved_config_bytes,
+        catalog.fingerprint(),
+        backend,
+        total_scene_count,
+    )?;
+    let resume = DatasetResumeIndex::open_or_create(dataset_root, manifest)?;
+    resume.persist_resolved_config(dataset_root, resolved_config_bytes)?;
+    persist_run_environment(dataset_root, &current_run_environment())?;
+    let preexisting = u64::try_from(resume.committed_scenes().len())
+        .map_err(|_| SnapshotRenderError::SceneCountOverflow)?;
+    tracing::info!(
+        corpus = %snapshot_root.display(),
+        dataset = %dataset_root.display(),
+        total_scenes = total_scene_count,
+        preexisting_scenes = preexisting,
+        "opened dataset for render-only run"
+    );
+    Ok((snapshots, resume, preexisting))
 }
 
 /// Serial render-only executor consuming an immutable snapshot corpus.
@@ -155,7 +217,7 @@ where
         resolved_config_bytes: &[u8],
         catalog: &ResolvedAssetCatalog,
         snapshot_root: &Path,
-    ) -> Result<SerialRunReport, SerialSnapshotRenderError> {
+    ) -> Result<RunReport, SnapshotRenderError> {
         self.run_until_cancelled(
             resolved_config_bytes,
             catalog,
@@ -178,46 +240,17 @@ where
         catalog: &ResolvedAssetCatalog,
         snapshot_root: &Path,
         cancellation: &CancellationToken,
-    ) -> Result<SerialRunReport, SerialSnapshotRenderError> {
-        validate_snapshot_corpus(
+    ) -> Result<RunReport, SnapshotRenderError> {
+        let (snapshots, resume, preexisting) = open_render_run(
             snapshot_root,
+            &self.dataset_root,
             resolved_config_bytes,
-            catalog.fingerprint(),
-            self.total_scene_count,
-        )?;
-        let _producer_environment = read_run_environment(snapshot_root)?;
-        let snapshots = read_snapshot_corpus(snapshot_root)?;
-        let found = u64::try_from(snapshots.len())
-            .map_err(|_| SerialSnapshotRenderError::SceneCountOverflow)?;
-        if found != self.total_scene_count
-            || snapshots
-                .iter()
-                .enumerate()
-                .any(|(index, scene)| scene.scene_id().get() != index as u64)
-        {
-            return Err(SerialSnapshotRenderError::IncompleteSnapshotCorpus {
-                expected: self.total_scene_count,
-                found,
-            });
-        }
-        let manifest = DatasetManifest::try_new(
-            resolved_config_bytes,
-            catalog.fingerprint(),
+            catalog,
             self.dataset.renderer().info(),
             self.total_scene_count,
         )?;
-        let resume = DatasetResumeIndex::open_or_create(&self.dataset_root, manifest)?;
-        resume.persist_resolved_config(&self.dataset_root, resolved_config_bytes)?;
-        persist_run_environment(&self.dataset_root, &current_run_environment())?;
-        let preexisting = u64::try_from(resume.committed_scenes().len())
-            .map_err(|_| SerialSnapshotRenderError::SceneCountOverflow)?;
         if cancellation.is_cancelled() {
-            return Ok(SerialRunReport::new(
-                preexisting,
-                0,
-                self.total_scene_count,
-                true,
-            ));
+            return Ok(RunReport::new(preexisting, 0, self.total_scene_count, true));
         }
         self.dataset.prepare(catalog)?;
         let mut generated = 0;
@@ -226,13 +259,14 @@ where
                 break;
             }
             let index = usize::try_from(scene_id.get())
-                .map_err(|_| SerialSnapshotRenderError::SceneCountOverflow)?;
+                .map_err(|_| SnapshotRenderError::SceneCountOverflow)?;
             let request = self.requests.plan(snapshots[index].clone())?;
             self.dataset.render_and_commit(&request)?;
             generated += 1;
         }
         self.dataset.flush()?;
-        Ok(SerialRunReport::new(
+        sync_scene_index(&self.dataset_root).map_err(PipelineRenderError::from)?;
+        Ok(RunReport::new(
             preexisting,
             generated,
             self.total_scene_count,
@@ -243,7 +277,7 @@ where
 
 /// Failure while generating a physics-only snapshot corpus.
 #[derive(Debug, Error)]
-pub enum SerialSnapshotSimulationError {
+pub enum SnapshotSimulationError {
     /// Snapshot corpus identity creation or compatibility failed.
     #[error(transparent)]
     CorpusOpen(#[from] SnapshotCorpusOpenError),
@@ -277,7 +311,7 @@ pub enum SerialSnapshotSimulationError {
 
 /// Failure while rendering an existing snapshot corpus.
 #[derive(Debug, Error)]
-pub enum SerialSnapshotRenderError {
+pub enum SnapshotRenderError {
     /// Snapshot corpus identity is missing or incompatible.
     #[error(transparent)]
     CorpusOpen(#[from] SnapshotCorpusOpenError),
@@ -307,6 +341,9 @@ pub enum SerialSnapshotRenderError {
     /// Renderer preparation or flush failed.
     #[error(transparent)]
     RendererLifecycle(#[from] RenderError),
+    /// The supplied renderers cannot form one pool.
+    #[error(transparent)]
+    RendererPool(#[from] RendererPoolError),
     /// A platform collection length exceeded the protocol count.
     #[error("scene count cannot be represented on this platform")]
     SceneCountOverflow,

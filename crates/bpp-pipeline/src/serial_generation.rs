@@ -8,7 +8,7 @@ use bpp_assets::ResolvedAssetCatalog;
 use bpp_core::{AssetId, BackendInfo, RenderError, RunPlan, SceneId};
 use bpp_dataset::{
     DatasetManifest, DatasetManifestError, DatasetOpenError, DatasetResumeIndex,
-    persist_run_environment,
+    persist_run_environment, sync_scene_index,
 };
 use bpp_physics_rapier::{PreparedPhysicsAsset, SceneGenerationError, SerialPhysicsGenerator};
 use bpp_render_api::Renderer;
@@ -16,8 +16,8 @@ use thiserror::Error;
 
 use crate::{
     CancellationToken, CompletedScene, InvalidParallelPhysicsExecutor, PipelineError,
-    PipelineRenderError, RenderRequestPlanner, RenderRequestPlanningError, SerialDatasetRenderer,
-    current_run_environment,
+    PipelineRenderError, RenderRequestPlanner, RenderRequestPlanningError, RendererPoolError,
+    SerialDatasetRenderer, current_run_environment,
 };
 
 /// Single-threaded reference composition of physics, request planning, rendering, and commit.
@@ -44,7 +44,7 @@ where
         prepared_assets: BTreeMap<AssetId, Arc<PreparedPhysicsAsset>>,
         renderer: R,
         dataset_root: impl Into<PathBuf>,
-    ) -> Result<Self, SerialGenerationPipelineError> {
+    ) -> Result<Self, GenerationPipelineError> {
         let dataset_root = dataset_root.into();
         Ok(Self {
             physics: SerialPhysicsGenerator::try_new(plan, prepared_assets)?,
@@ -75,12 +75,12 @@ where
     pub fn generate_and_commit(
         &mut self,
         scene_id: SceneId,
-    ) -> Result<CompletedScene, SerialGenerationPipelineError> {
+    ) -> Result<CompletedScene, GenerationPipelineError> {
         let scene = self.physics.generate_scene(scene_id)?;
         let request = self.requests.plan(scene)?;
         self.dataset
             .render_and_commit(&request)
-            .map_err(SerialGenerationPipelineError::Render)
+            .map_err(GenerationPipelineError::Render)
     }
 
     /// Flushes the owned renderer at a durability or shutdown boundary.
@@ -105,7 +105,7 @@ where
         &mut self,
         resolved_config_bytes: &[u8],
         catalog: &ResolvedAssetCatalog,
-    ) -> Result<SerialRunReport, SerialGenerationPipelineError> {
+    ) -> Result<RunReport, GenerationPipelineError> {
         self.run_until_cancelled(resolved_config_bytes, catalog, &CancellationToken::new())
     }
 
@@ -122,7 +122,7 @@ where
         resolved_config_bytes: &[u8],
         catalog: &ResolvedAssetCatalog,
         cancellation: &CancellationToken,
-    ) -> Result<SerialRunReport, SerialGenerationPipelineError> {
+    ) -> Result<RunReport, GenerationPipelineError> {
         let (resume, preexisting_scene_count) = open_dataset_run(
             &self.dataset_root,
             resolved_config_bytes,
@@ -132,7 +132,7 @@ where
         )?;
 
         if cancellation.is_cancelled() {
-            return Ok(SerialRunReport {
+            return Ok(RunReport {
                 preexisting_scene_count,
                 generated_scene_count: 0,
                 total_scene_count: self.total_scene_count,
@@ -150,8 +150,9 @@ where
             generated_scene_count += 1;
         }
         self.flush()?;
+        sync_scene_index(&self.dataset_root).map_err(PipelineRenderError::from)?;
 
-        Ok(SerialRunReport {
+        Ok(RunReport {
             preexisting_scene_count,
             generated_scene_count,
             total_scene_count: self.total_scene_count,
@@ -169,7 +170,7 @@ pub(crate) fn open_dataset_run(
     catalog: &ResolvedAssetCatalog,
     backend: BackendInfo,
     total_scene_count: u64,
-) -> Result<(DatasetResumeIndex, u64), SerialGenerationPipelineError> {
+) -> Result<(DatasetResumeIndex, u64), GenerationPipelineError> {
     let manifest = DatasetManifest::try_new(
         resolved_config_bytes,
         catalog.fingerprint(),
@@ -180,20 +181,26 @@ pub(crate) fn open_dataset_run(
     resume.persist_resolved_config(dataset_root, resolved_config_bytes)?;
     persist_run_environment(dataset_root, &current_run_environment())?;
     let preexisting_scene_count = u64::try_from(resume.committed_scenes().len())
-        .map_err(|_| SerialGenerationPipelineError::SceneCountOverflow)?;
+        .map_err(|_| GenerationPipelineError::SceneCountOverflow)?;
+    tracing::info!(
+        dataset = %dataset_root.display(),
+        total_scenes = total_scene_count,
+        preexisting_scenes = preexisting_scene_count,
+        "opened dataset"
+    );
     Ok((resume, preexisting_scene_count))
 }
 
-/// Deterministic completion counts for one serial run invocation.
+/// Deterministic completion counts for one serial or parallel run invocation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SerialRunReport {
+pub struct RunReport {
     preexisting_scene_count: u64,
     generated_scene_count: u64,
     total_scene_count: u64,
     was_cancelled: bool,
 }
 
-impl SerialRunReport {
+impl RunReport {
     pub(crate) const fn new(
         preexisting_scene_count: u64,
         generated_scene_count: u64,
@@ -233,9 +240,9 @@ impl SerialRunReport {
     }
 }
 
-/// Failure in the serial reference generation composition.
+/// Failure while generating, rendering, and committing a dataset.
 #[derive(Debug, Error)]
-pub enum SerialGenerationPipelineError {
+pub enum GenerationPipelineError {
     /// Physical planning, simulation, or final-state validation failed.
     #[error(transparent)]
     Physics(#[from] SceneGenerationError),
@@ -254,6 +261,9 @@ pub enum SerialGenerationPipelineError {
     /// Renderer preparation or flushing failed.
     #[error(transparent)]
     RendererLifecycle(#[from] RenderError),
+    /// The supplied renderers cannot form one pool.
+    #[error(transparent)]
+    RendererPool(#[from] RendererPoolError),
     /// The parallel physics stage failed.
     #[error(transparent)]
     ParallelPhysics(#[from] PipelineError),

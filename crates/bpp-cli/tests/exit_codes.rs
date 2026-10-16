@@ -224,3 +224,53 @@ fn parallel_simulate_writes_the_same_corpus_as_serial_simulate() {
     assert_eq!(scenes[0].len(), 4);
     assert_eq!(scenes[0], scenes[1]);
 }
+
+#[test]
+fn seed_and_scene_overrides_are_written_into_the_resolved_config() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let config = write_run(root.path());
+    let corpus = root.path().join("corpus");
+    let output = bpp(&[
+        "simulate",
+        "--config",
+        config.to_str().expect("UTF-8 path"),
+        "--output",
+        corpus.to_str().expect("UTF-8 path"),
+        "--seed",
+        "1234",
+        "--scenes",
+        "3",
+    ]);
+    assert_eq!(exit_code(&output), 0, "{}", stderr(&output));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("report is JSON");
+    assert_eq!(report["total_scenes"], 3);
+    let resolved =
+        fs::read_to_string(corpus.join("resolved-config.toml")).expect("resolved config");
+    assert!(resolved.contains("master_seed = 1234"), "{resolved}");
+    assert!(resolved.contains("valid_scene_count = 3"), "{resolved}");
+}
+
+#[test]
+fn json_logging_writes_one_json_object_per_stderr_line() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let config = write_run(root.path());
+    let output = bpp(&[
+        "--log-format",
+        "json",
+        "prepare-assets",
+        "--config",
+        config.to_str().expect("UTF-8 path"),
+    ]);
+    assert_eq!(exit_code(&output), 0, "{}", stderr(&output));
+    let logs = stderr(&output);
+    assert!(!logs.trim().is_empty());
+    for line in logs.lines() {
+        let event: serde_json::Value = serde_json::from_str(line).expect("log line is JSON");
+        assert!(event["fields"]["message"].is_string(), "{line}");
+    }
+}
+
+#[test]
+fn an_unknown_log_format_exits_2() {
+    assert_eq!(exit_code(&bpp(&["--log-format", "xml", "schema"])), 2);
+}

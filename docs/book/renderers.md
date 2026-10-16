@@ -1,6 +1,6 @@
 # Renderer architecture and operation
 
-Both renderers implement `bpp_core::Renderer` with the same
+Both renderers implement `bpp_render_api::Renderer` with the same
 `ResolvedAssetCatalog`, `RenderSceneRequest`, and `SceneStagingArea` boundary.
 There is no implicit fallback: selecting BlenderProc and failing to start it is
 an error, not permission to produce a wgpu dataset.

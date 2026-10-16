@@ -1,12 +1,13 @@
 use std::{
-    fs::{self, File},
-    io,
+    fs, io,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 
 use bpp_core::RenderChannels;
 use bpp_core::{CameraId, SceneId};
+
+use crate::durability::{DurabilityError, DurableBatch, sync_now};
 
 /// Expected per-camera artifacts for one rendered scene.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -276,11 +277,7 @@ impl SceneStagingArea {
                     relative_path: relative_path.clone(),
                 });
             }
-            File::open(&path)
-                .and_then(|file| file.sync_all())
-                .map_err(|error| io_error(path, &error))?;
         }
-        sync_directory(&self.root)?;
 
         let dataset_root =
             self.root
@@ -292,16 +289,25 @@ impl SceneStagingArea {
                 })?;
         let scenes = dataset_root.join("scenes");
         fs::create_dir_all(&scenes).map_err(|error| io_error(scenes.clone(), &error))?;
-        sync_directory(&scenes)?;
         let destination = scenes.join(format!("{:020}", self.scene_id.get()));
         if destination.exists() {
             return Err(SceneCommitError::DestinationExists {
                 scene_id: self.scene_id,
             });
         }
+        // Every artifact reaches storage before the rename can, so a published
+        // scene is never partial. The rename itself becomes durable with the
+        // next commit's flush or `sync_scene_index`; losing it only means the
+        // scene is regenerated on resume.
+        let mut batch = DurableBatch::default();
+        batch.add_tree(&self.root).map_err(durability_error)?;
+        batch.add(&scenes).map_err(durability_error)?;
+        batch.flush().map_err(durability_error)?;
         fs::rename(&self.root, &destination)
             .map_err(|error| io_error(destination.clone(), &error))?;
-        sync_directory(&scenes)?;
+        DurableBatch::default()
+            .add(&scenes)
+            .map_err(durability_error)?;
         self.cleanup_on_drop = false;
         Ok(destination)
     }
@@ -336,10 +342,19 @@ fn required_artifacts(requirements: &SceneArtifactRequirements) -> Vec<PathBuf> 
     paths
 }
 
-fn sync_directory(path: &Path) -> Result<(), SceneCommitError> {
-    File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| io_error(path.to_owned(), &error))
+/// Makes every committed scene's rename durable.
+///
+/// Call once at the end of a run; each commit already makes its own data durable.
+///
+/// # Errors
+///
+/// Returns the filesystem error from flushing the dataset's scene directory.
+pub fn sync_scene_index(dataset_root: &Path) -> Result<(), SceneCommitError> {
+    sync_now(&dataset_root.join("scenes")).map_err(durability_error)
+}
+
+fn durability_error(error: DurabilityError) -> SceneCommitError {
+    io_error(error.path, &error.source)
 }
 
 fn io_error(path: PathBuf, error: &io::Error) -> SceneCommitError {

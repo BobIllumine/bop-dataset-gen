@@ -6,16 +6,22 @@ use std::{
 
 use bpp_assets::ResolvedAssetCatalog;
 use bpp_core::{AssetId, RunPlan, SceneId, SceneSnapshot};
-use bpp_dataset::write_scene_snapshot;
+use bpp_dataset::{sync_scene_index, sync_snapshot_index, write_scene_snapshots};
 use bpp_physics_rapier::PreparedPhysicsAsset;
 use bpp_render_api::Renderer;
+use crossbeam_channel::Receiver;
 
 use crate::{
-    CancellationToken, ParallelPhysicsExecutor, PipelineError, RapierSimulatorFactory,
-    RenderRequestPlanner, SerialDatasetRenderer, SerialGenerationPipelineError, SerialRunReport,
-    SerialSnapshotSimulationError, serial_generation::open_dataset_run,
-    snapshot_pipeline::open_simulation_corpus,
+    CancellationToken, GenerationPipelineError, ParallelPhysicsExecutor, PhysicsStageReport,
+    PipelineError, PipelineRenderError, RapierSimulatorFactory, RenderRequestPlanner, RunReport,
+    SerialDatasetRenderer, SnapshotRenderError, SnapshotSimulationError,
+    render_pool::{dataset_renderers, render_pool},
+    serial_generation::open_dataset_run,
+    snapshot_pipeline::{open_render_run, open_simulation_corpus},
 };
+
+/// Largest number of snapshots committed under one storage flush.
+const SNAPSHOT_BATCH_LIMIT: usize = 64;
 
 /// Physics-only executor that simulates scenes on parallel workers and publishes snapshots.
 ///
@@ -36,7 +42,7 @@ impl ParallelSnapshotSimulator {
     pub fn try_new(
         plan: &RunPlan,
         prepared_assets: BTreeMap<AssetId, Arc<PreparedPhysicsAsset>>,
-    ) -> Result<Self, SerialSnapshotSimulationError> {
+    ) -> Result<Self, SnapshotSimulationError> {
         Ok(Self {
             executor: ParallelPhysicsExecutor::from_plan(plan)?,
             factory: RapierSimulatorFactory::new(plan.clone(), prepared_assets),
@@ -46,9 +52,10 @@ impl ParallelSnapshotSimulator {
 
     /// Generates every missing scene snapshot on the worker pool.
     ///
-    /// Snapshots are written as they arrive, in completion order. Existing
-    /// snapshots are resume points and are never replaced. After cancellation,
-    /// snapshots already simulated are still written.
+    /// Snapshots are committed in completion order, in batches of whatever has
+    /// queued up, with one storage flush per batch. Existing snapshots are
+    /// resume points and are never replaced. After cancellation, snapshots
+    /// already simulated are still written.
     ///
     /// # Errors
     ///
@@ -59,7 +66,7 @@ impl ParallelSnapshotSimulator {
         asset_catalog_fingerprint: &str,
         corpus_root: &Path,
         cancellation: &CancellationToken,
-    ) -> Result<SerialRunReport, SerialSnapshotSimulationError> {
+    ) -> Result<RunReport, SnapshotSimulationError> {
         let (preexisting_scene_count, existing) = open_simulation_corpus(
             resolved_config_bytes,
             asset_catalog_fingerprint,
@@ -70,17 +77,25 @@ impl ParallelSnapshotSimulator {
             .map(SceneId::new)
             .filter(|scene_id| !existing.contains(scene_id))
             .collect::<Vec<_>>();
-        let generated_scene_count = run_with_consumer(
+        let generated_scene_count = with_parallel_physics(
             &self.executor,
             &self.factory,
             &pending,
             cancellation,
-            |scene| {
-                write_scene_snapshot(corpus_root, &scene)?;
-                Ok::<_, SerialSnapshotSimulationError>(true)
+            |receiver| {
+                let mut written = 0_u64;
+                while let Ok(first) = receiver.recv() {
+                    let mut batch = vec![first];
+                    batch.extend(receiver.try_iter().take(SNAPSHOT_BATCH_LIMIT - 1));
+                    write_scene_snapshots(corpus_root, &batch)?;
+                    tracing::debug!(snapshots = batch.len(), "committed snapshot batch");
+                    written += batch.len() as u64;
+                }
+                Ok::<_, SnapshotSimulationError>(written)
             },
         )?;
-        Ok(SerialRunReport::new(
+        sync_snapshot_index(corpus_root)?;
+        Ok(RunReport::new(
             preexisting_scene_count,
             generated_scene_count,
             self.total_scene_count,
@@ -89,15 +104,16 @@ impl ParallelSnapshotSimulator {
     }
 }
 
-/// Generation pipeline with parallel physics feeding one renderer on the calling thread.
+/// Generation pipeline with parallel physics feeding a pool of renderers.
 ///
-/// Scenes are committed in completion order. Each commit is atomic and keyed
-/// by scene ID, so the finished dataset matches [`crate::SerialGenerationPipeline`].
+/// Each renderer runs on its own thread. Scenes are committed in completion
+/// order; each commit is atomic and keyed by scene ID, so the finished dataset
+/// matches [`crate::SerialGenerationPipeline`].
 pub struct ParallelGenerationPipeline<R> {
     executor: ParallelPhysicsExecutor,
     factory: RapierSimulatorFactory,
     requests: RenderRequestPlanner,
-    dataset: SerialDatasetRenderer<R>,
+    datasets: Vec<SerialDatasetRenderer<R>>,
     dataset_root: PathBuf,
     total_scene_count: u64,
 }
@@ -106,29 +122,32 @@ impl<R> ParallelGenerationPipeline<R>
 where
     R: Renderer,
 {
-    /// Reads the configured worker bounds and captures physics and render planning state.
+    /// Reads the configured physics bounds and captures one dataset writer per renderer.
     ///
     /// # Errors
     ///
-    /// Returns a typed error when the configured worker count or queue capacity is zero.
+    /// Returns a typed error when the configured worker count or queue
+    /// capacity is zero, no renderer is supplied, or renderers disagree on
+    /// backend provenance.
     pub fn try_new(
         plan: &RunPlan,
         prepared_assets: BTreeMap<AssetId, Arc<PreparedPhysicsAsset>>,
-        renderer: R,
+        renderers: impl IntoIterator<Item = R>,
         dataset_root: impl Into<PathBuf>,
-    ) -> Result<Self, SerialGenerationPipelineError> {
+    ) -> Result<Self, GenerationPipelineError> {
         let dataset_root = dataset_root.into();
+        let (datasets, _) = dataset_renderers(renderers, &dataset_root)?;
         Ok(Self {
             executor: ParallelPhysicsExecutor::from_plan(plan)?,
             factory: RapierSimulatorFactory::new(plan.clone(), prepared_assets),
             requests: RenderRequestPlanner::new(plan),
-            dataset: SerialDatasetRenderer::new(renderer, &dataset_root),
+            datasets,
             dataset_root,
             total_scene_count: u64::from(plan.run().valid_scene_count()),
         })
     }
 
-    /// Opens the run manifest, prepares the renderer, and commits every pending scene.
+    /// Opens the run manifest, prepares every renderer, and commits every pending scene.
     ///
     /// # Errors
     ///
@@ -137,14 +156,14 @@ where
         &mut self,
         resolved_config_bytes: &[u8],
         catalog: &ResolvedAssetCatalog,
-    ) -> Result<SerialRunReport, SerialGenerationPipelineError> {
+    ) -> Result<RunReport, GenerationPipelineError> {
         self.run_until_cancelled(resolved_config_bytes, catalog, &CancellationToken::new())
     }
 
     /// Runs pending scenes until completion or cooperative cancellation.
     ///
-    /// Cancellation stops physics from claiming new scenes and stops the
-    /// renderer before its next scene; an in-flight render still reaches its
+    /// Cancellation stops physics from claiming new scenes and stops each
+    /// renderer before its next scene; in-flight renders still reach their
     /// atomic commit. Simulated snapshots that were never rendered are
     /// discarded and regenerated identically on resume.
     ///
@@ -156,16 +175,16 @@ where
         resolved_config_bytes: &[u8],
         catalog: &ResolvedAssetCatalog,
         cancellation: &CancellationToken,
-    ) -> Result<SerialRunReport, SerialGenerationPipelineError> {
+    ) -> Result<RunReport, GenerationPipelineError> {
         let (resume, preexisting_scene_count) = open_dataset_run(
             &self.dataset_root,
             resolved_config_bytes,
             catalog,
-            self.dataset.renderer().info(),
+            self.datasets[0].renderer().info(),
             self.total_scene_count,
         )?;
         if cancellation.is_cancelled() {
-            return Ok(SerialRunReport::new(
+            return Ok(RunReport::new(
                 preexisting_scene_count,
                 0,
                 self.total_scene_count,
@@ -173,29 +192,31 @@ where
             ));
         }
 
-        self.dataset.prepare(catalog)?;
+        for dataset in &mut self.datasets {
+            dataset.prepare(catalog)?;
+        }
         let pending = resume.pending_scenes().collect::<Vec<_>>();
-        let requests = &self.requests;
-        let dataset = &mut self.dataset;
-        let generated_scene_count = run_with_consumer::<SerialGenerationPipelineError>(
+        let (requests, datasets) = (&self.requests, &mut self.datasets);
+        let generated_scene_count = with_parallel_physics(
             &self.executor,
             &self.factory,
             &pending,
             cancellation,
-            |scene| {
-                if cancellation.is_cancelled() {
-                    return Ok(false);
-                }
-                let request = requests.plan(scene)?;
-                dataset
-                    .render_and_commit(&request)
-                    .map_err(SerialGenerationPipelineError::Render)?;
-                Ok(true)
+            |receiver| {
+                render_pool::<R, GenerationPipelineError>(
+                    datasets,
+                    requests,
+                    receiver,
+                    cancellation,
+                )
             },
         )?;
-        self.dataset.flush()?;
+        for dataset in &mut self.datasets {
+            dataset.flush()?;
+        }
+        sync_scene_index(&self.dataset_root).map_err(PipelineRenderError::from)?;
 
-        Ok(SerialRunReport::new(
+        Ok(RunReport::new(
             preexisting_scene_count,
             generated_scene_count,
             self.total_scene_count,
@@ -204,47 +225,145 @@ where
     }
 }
 
-/// Runs the executor on a background thread and feeds each snapshot to `consume`
-/// on the calling thread.
+/// Render-only executor that renders a stored snapshot corpus on a pool of renderers.
+pub struct ParallelSnapshotRenderer<R> {
+    requests: RenderRequestPlanner,
+    datasets: Vec<SerialDatasetRenderer<R>>,
+    dataset_root: PathBuf,
+    queue_capacity: usize,
+    total_scene_count: u64,
+}
+
+impl<R> ParallelSnapshotRenderer<R>
+where
+    R: Renderer,
+{
+    /// Captures render planning and one dataset writer per renderer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when no renderer is supplied or renderers
+    /// disagree on backend provenance.
+    pub fn try_new(
+        plan: &RunPlan,
+        renderers: impl IntoIterator<Item = R>,
+        dataset_root: impl Into<PathBuf>,
+    ) -> Result<Self, SnapshotRenderError> {
+        let dataset_root = dataset_root.into();
+        let (datasets, _) = dataset_renderers(renderers, &dataset_root)?;
+        Ok(Self {
+            requests: RenderRequestPlanner::new(plan),
+            datasets,
+            dataset_root,
+            queue_capacity: plan.run().queue_capacity().max(1) as usize,
+            total_scene_count: u64::from(plan.run().valid_scene_count()),
+        })
+    }
+
+    /// Renders a complete canonical snapshot corpus without running physics.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed corpus, resume, planning, rendering, or lifecycle failure.
+    pub fn run_to_completion(
+        &mut self,
+        resolved_config_bytes: &[u8],
+        catalog: &ResolvedAssetCatalog,
+        snapshot_root: &Path,
+    ) -> Result<RunReport, SnapshotRenderError> {
+        self.run_until_cancelled(
+            resolved_config_bytes,
+            catalog,
+            snapshot_root,
+            &CancellationToken::new(),
+        )
+    }
+
+    /// Renders pending snapshots until completion or cooperative cancellation.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same typed failures as [`Self::run_to_completion`].
+    pub fn run_until_cancelled(
+        &mut self,
+        resolved_config_bytes: &[u8],
+        catalog: &ResolvedAssetCatalog,
+        snapshot_root: &Path,
+        cancellation: &CancellationToken,
+    ) -> Result<RunReport, SnapshotRenderError> {
+        let (snapshots, resume, preexisting) = open_render_run(
+            snapshot_root,
+            &self.dataset_root,
+            resolved_config_bytes,
+            catalog,
+            self.datasets[0].renderer().info(),
+            self.total_scene_count,
+        )?;
+        if cancellation.is_cancelled() {
+            return Ok(RunReport::new(preexisting, 0, self.total_scene_count, true));
+        }
+        for dataset in &mut self.datasets {
+            dataset.prepare(catalog)?;
+        }
+        let mut pending = snapshots;
+        pending.retain(|scene| resume.pending_scenes().any(|id| id == scene.scene_id()));
+        let (sender, receiver) = crossbeam_channel::bounded(self.queue_capacity);
+        let (requests, datasets) = (&self.requests, &mut self.datasets);
+        let generated = std::thread::scope(|scope| {
+            scope.spawn(move || {
+                for scene in pending {
+                    if cancellation.is_cancelled() || sender.send(scene).is_err() {
+                        break;
+                    }
+                }
+            });
+            render_pool::<R, SnapshotRenderError>(datasets, requests, receiver, cancellation)
+        })?;
+        for dataset in &mut self.datasets {
+            dataset.flush()?;
+        }
+        sync_scene_index(&self.dataset_root).map_err(PipelineRenderError::from)?;
+        Ok(RunReport::new(
+            preexisting,
+            generated,
+            self.total_scene_count,
+            cancellation.is_cancelled(),
+        ))
+    }
+}
+
+/// Runs the physics executor on a background thread while `consume` drains its
+/// output on the calling thread.
 ///
-/// `consume` returns `Ok(false)` to stop early. Stopping or failing drops the
-/// receiver, which makes workers stop at their next send. Returns the number of
-/// snapshots consumed. A consumer error takes precedence over the physics error
-/// it caused; any other physics error is returned as is.
-fn run_with_consumer<E>(
+/// `consume` owns the receiver and must drop it before returning, which makes
+/// workers stop at their next send. Returns what `consume` returns. A consumer
+/// error takes precedence over the physics error it caused; any other physics
+/// error is returned as is.
+fn with_parallel_physics<E>(
     executor: &ParallelPhysicsExecutor,
     factory: &RapierSimulatorFactory,
     scene_ids: &[SceneId],
     cancellation: &CancellationToken,
-    mut consume: impl FnMut(SceneSnapshot) -> Result<bool, E>,
+    consume: impl FnOnce(Receiver<SceneSnapshot>) -> Result<u64, E>,
 ) -> Result<u64, E>
 where
     E: From<PipelineError>,
 {
     let (sender, receiver) = executor.channel();
-    let (physics, consumed) = std::thread::scope(|scope| {
-        let physics =
-            scope.spawn(move || executor.run_scenes(scene_ids, factory, sender, cancellation));
-        let consumed = (|| -> Result<u64, E> {
-            let mut count = 0_u64;
-            for scene in &receiver {
-                if !consume(scene)? {
-                    break;
-                }
-                count += 1;
-            }
-            Ok(count)
-        })();
-        drop(receiver);
-        let physics = physics
-            .join()
-            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-        (physics, consumed)
-    });
+    let (physics, consumed): (Result<PhysicsStageReport, PipelineError>, _) =
+        std::thread::scope(|scope| {
+            let physics =
+                scope.spawn(move || executor.run_scenes(scene_ids, factory, sender, cancellation));
+            let consumed = consume(receiver);
+            let physics = physics
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            (physics, consumed)
+        });
     let count = consumed?;
     match physics {
-        // Only this function drops the receiver, so the consumer stopped first
-        // and its own result already describes the outcome.
+        // Only the consumer drops the receiver, so it stopped first and its
+        // own result already describes the outcome.
         Ok(_) | Err(PipelineError::ReceiverDropped) => Ok(count),
         Err(error) => Err(error.into()),
     }

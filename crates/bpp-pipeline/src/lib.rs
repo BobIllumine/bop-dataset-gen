@@ -5,6 +5,7 @@ mod benchmark;
 mod cancellation;
 mod parallel_generation;
 mod parallel_physics;
+mod render_pool;
 mod request_planner;
 mod serial_generation;
 mod snapshot_pipeline;
@@ -12,18 +13,18 @@ mod snapshot_pipeline;
 pub use asset_preparation::{AssetPreparationError, PreparedAssetCatalog, prepare_asset_catalog};
 pub use benchmark::{InvalidRenderBenchmarkSummary, RenderBenchmarkSummary};
 pub use cancellation::CancellationToken;
-pub use parallel_generation::{ParallelGenerationPipeline, ParallelSnapshotSimulator};
+pub use parallel_generation::{
+    ParallelGenerationPipeline, ParallelSnapshotRenderer, ParallelSnapshotSimulator,
+};
 pub use parallel_physics::{
     InvalidParallelPhysicsExecutor, ParallelPhysicsExecutor, PhysicsSimulator, PhysicsStageReport,
     PipelineError, RapierSimulator, RapierSimulatorFactory, SimulatorFactory,
 };
+pub use render_pool::RendererPoolError;
 pub use request_planner::{RenderRequestPlanner, RenderRequestPlanningError};
-pub use serial_generation::{
-    SerialGenerationPipeline, SerialGenerationPipelineError, SerialRunReport,
-};
+pub use serial_generation::{GenerationPipelineError, RunReport, SerialGenerationPipeline};
 pub use snapshot_pipeline::{
-    SerialSnapshotRenderError, SerialSnapshotRenderer, SerialSnapshotSimulationError,
-    SerialSnapshotSimulator,
+    SerialSnapshotRenderer, SerialSnapshotSimulator, SnapshotRenderError, SnapshotSimulationError,
 };
 
 fn current_run_environment() -> bpp_dataset::RunEnvironment {
@@ -142,6 +143,11 @@ where
             field: RenderReportField::CameraCount,
         })?;
         let scene_path = staging.commit(&requirements)?;
+        tracing::debug!(
+            scene = request.scene().scene_id().get(),
+            cameras = camera_count,
+            "committed rendered scene"
+        );
         Ok(CompletedScene { report, scene_path })
     }
 

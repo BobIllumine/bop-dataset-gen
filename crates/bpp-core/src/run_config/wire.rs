@@ -609,7 +609,7 @@ struct AssetWeightedValueSchema {
 }
 
 #[cfg(feature = "schema")]
-pub(super) fn json_schema() -> String {
+pub(crate) fn json_schema() -> String {
     let mut schema = serde_json::to_value(schemars::schema_for!(RunConfigWire))
         .expect("serializing a generated JSON Schema cannot fail");
     remove_json_null(&mut schema);

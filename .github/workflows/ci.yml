@@ -90,6 +90,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo run --locked -p xtask -- schema --check
 
+  book:
+    name: Developer guide
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook@0.5.4
+      - run: mdbook build docs
+
   deny:
     name: Dependency policy
     runs-on: ubuntu-latest
@@ -140,7 +150,7 @@ jobs:
   ci-ok:
     name: CI passed
     if: always()
-    needs: [fmt, clippy, test, docs, schema, deny, coverage, worker]
+    needs: [fmt, clippy, test, docs, schema, book, deny, coverage, worker]
     runs-on: ubuntu-latest
     steps:
       - name: Require every job to succeed

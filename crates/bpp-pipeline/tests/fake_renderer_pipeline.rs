@@ -12,8 +12,8 @@ use bpp_core::{
 use bpp_dataset::{DepthFrame, InstanceFrame, RgbFrame, SceneStagingArea};
 use bpp_physics_rapier::PreparedPhysicsAsset;
 use bpp_pipeline::{
-    CancellationToken, ParallelGenerationPipeline, ParallelSnapshotSimulator,
-    SerialSnapshotRenderer, SerialSnapshotSimulator,
+    CancellationToken, ParallelGenerationPipeline, ParallelSnapshotRenderer,
+    ParallelSnapshotSimulator, SerialSnapshotRenderer, SerialSnapshotSimulator,
 };
 use bpp_pipeline::{PipelineRenderError, SerialDatasetRenderer, SerialGenerationPipeline};
 use bpp_render_api::Renderer;
@@ -612,7 +612,7 @@ fn parallel_generation_commits_the_same_scenes_as_serial_generation() {
     let report = ParallelGenerationPipeline::try_new(
         &plan,
         prepared_assets(),
-        FakeRenderer::all_channels(),
+        [FakeRenderer::all_channels(), FakeRenderer::all_channels()],
         parallel_root.path(),
     )
     .unwrap()
@@ -640,7 +640,7 @@ fn parallel_generation_stops_after_cancellation_and_resumes() {
     let interrupted = ParallelGenerationPipeline::try_new(
         &plan,
         prepared_assets(),
-        FakeRenderer::cancelling(cancellation.clone()),
+        [FakeRenderer::cancelling(cancellation.clone())],
         root.path(),
     )
     .unwrap()
@@ -660,7 +660,7 @@ fn parallel_generation_stops_after_cancellation_and_resumes() {
     let resumed = ParallelGenerationPipeline::try_new(
         &plan,
         prepared_assets(),
-        FakeRenderer::all_channels(),
+        [FakeRenderer::all_channels(), FakeRenderer::all_channels()],
         root.path(),
     )
     .unwrap()
@@ -669,4 +669,55 @@ fn parallel_generation_stops_after_cancellation_and_resumes() {
     assert_eq!(resumed.preexisting_scene_count(), 1);
     assert_eq!(resumed.generated_scene_count(), 5);
     assert_eq!(root.path().join("scenes").read_dir().unwrap().count(), 6);
+}
+
+#[test]
+fn parallel_render_only_pipeline_matches_serial_rendering() {
+    let resolved_config = parallel_config(5);
+    let plan = RunConfig::from_toml(&resolved_config).unwrap().into_plan();
+    let visual_catalog = catalog();
+    let corpus = tempfile::tempdir().unwrap();
+    let serial_root = tempfile::tempdir().unwrap();
+    let parallel_root = tempfile::tempdir().unwrap();
+    ParallelSnapshotSimulator::try_new(&plan, prepared_assets())
+        .unwrap()
+        .run(
+            resolved_config.as_bytes(),
+            visual_catalog.fingerprint(),
+            corpus.path(),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+    SerialSnapshotRenderer::new(&plan, FakeRenderer::all_channels(), serial_root.path())
+        .run_to_completion(resolved_config.as_bytes(), &visual_catalog, corpus.path())
+        .unwrap();
+    let report = ParallelSnapshotRenderer::try_new(
+        &plan,
+        (0..3).map(|_| FakeRenderer::all_channels()),
+        parallel_root.path(),
+    )
+    .unwrap()
+    .run_to_completion(resolved_config.as_bytes(), &visual_catalog, corpus.path())
+    .unwrap();
+
+    assert_eq!(report.generated_scene_count(), 5);
+    assert_eq!(
+        tree_bytes(&parallel_root.path().join("scenes")),
+        tree_bytes(&serial_root.path().join("scenes"))
+    );
+}
+
+#[test]
+fn a_parallel_pipeline_needs_at_least_one_renderer() {
+    let plan = RunConfig::from_toml(&parallel_config(1))
+        .unwrap()
+        .into_plan();
+    let root = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        ParallelSnapshotRenderer::try_new(&plan, Vec::<FakeRenderer>::new(), root.path()),
+        Err(bpp_pipeline::SnapshotRenderError::RendererPool(
+            bpp_pipeline::RendererPoolError::Empty
+        ))
+    ));
 }

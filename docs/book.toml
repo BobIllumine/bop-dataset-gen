@@ -1,0 +1,8 @@
+[book]
+title = "bpp-dataset-gen developer guide"
+language = "en"
+src = "book"
+
+[build]
+build-dir = "../target/book"
+create-missing = false

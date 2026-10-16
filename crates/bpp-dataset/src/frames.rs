@@ -200,8 +200,10 @@ impl DepthFrame {
                 .with_pixel_fn(|position: Vec2<usize>| {
                     (self.metres[position.y() * width + position.x()],)
                 });
+        // Sequential encoding keeps chunk order, and so the file bytes, deterministic.
         Image::from_channels((width, height), pixels)
             .write()
+            .non_parallel()
             .to_file(path)?;
         Ok(())
     }

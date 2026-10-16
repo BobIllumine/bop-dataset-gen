@@ -1,5 +1,6 @@
 //! Canonical dataset storage, validation, resume, and export.
 
+mod durability;
 mod frames;
 mod resume;
 mod snapshot_corpus;
@@ -14,10 +15,11 @@ pub use resume::{
 };
 pub use snapshot_corpus::{
     SnapshotCorpusError, SnapshotCorpusOpenError, open_snapshot_corpus, read_snapshot_corpus,
-    validate_snapshot_corpus, write_scene_snapshot,
+    sync_snapshot_index, validate_snapshot_corpus, write_scene_snapshot, write_scene_snapshots,
 };
 pub use staging::{
-    InvalidSceneArtifactRequirements, SceneArtifactRequirements, SceneCommitError, SceneStagingArea,
+    InvalidSceneArtifactRequirements, SceneArtifactRequirements, SceneCommitError,
+    SceneStagingArea, sync_scene_index,
 };
 pub use validation::{
     DatasetValidationError, DatasetValidationReport, validate_and_write_checksums, validate_dataset,
