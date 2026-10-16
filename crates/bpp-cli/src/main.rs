@@ -7,7 +7,7 @@ use std::{
 };
 
 #[cfg(feature = "blenderproc")]
-use bpp_core::Renderer as _;
+use bpp_render_api::Renderer as _;
 
 fn main() -> ExitCode {
     run(std::env::args().skip(1))
@@ -368,20 +368,29 @@ fn simulate(config_path: &std::path::Path, output: &std::path::Path) -> ExitCode
                 return configuration_error(&format!("asset preparation failed: {error}"));
             }
         };
-    let simulator = match bpp_pipeline::SerialSnapshotSimulator::try_new(
-        loaded.config.plan(),
-        prepared.shared_physics_assets(),
-    ) {
-        Ok(simulator) => simulator,
-        Err(error) => return configuration_error(&format!("simulation setup failed: {error}")),
-    };
+    let plan = loaded.config.plan();
+    let fingerprint = prepared.visual_assets().fingerprint();
     let cancellation = bpp_pipeline::CancellationToken::new();
-    match simulator.run(
-        &loaded.bytes,
-        prepared.visual_assets().fingerprint(),
-        output,
-        &cancellation,
-    ) {
+    let result = if plan.run().simulation_workers() > 1 {
+        match bpp_pipeline::ParallelSnapshotSimulator::try_new(
+            plan,
+            prepared.shared_physics_assets(),
+        ) {
+            Ok(simulator) => simulator.run(&loaded.bytes, fingerprint, output, &cancellation),
+            Err(error) => {
+                return configuration_error(&format!("simulation setup failed: {error}"));
+            }
+        }
+    } else {
+        match bpp_pipeline::SerialSnapshotSimulator::try_new(plan, prepared.shared_physics_assets())
+        {
+            Ok(simulator) => simulator.run(&loaded.bytes, fingerprint, output, &cancellation),
+            Err(error) => {
+                return configuration_error(&format!("simulation setup failed: {error}"));
+            }
+        }
+    };
+    match result {
         Ok(report) => {
             println!(
                 "{}",
@@ -510,10 +519,7 @@ fn run_render<R>(
     renderer: R,
 ) -> ExitCode
 where
-    R: bpp_core::Renderer<
-            AssetCatalog = bpp_assets::ResolvedAssetCatalog,
-            StagingArea = bpp_dataset::SceneStagingArea,
-        >,
+    R: bpp_render_api::Renderer,
 {
     let mut pipeline =
         bpp_pipeline::SerialSnapshotRenderer::new(loaded.config.plan(), renderer, output);
@@ -582,26 +588,43 @@ fn run_generate<R>(
     renderer: R,
 ) -> ExitCode
 where
-    R: bpp_core::Renderer<
-            AssetCatalog = bpp_assets::ResolvedAssetCatalog,
-            StagingArea = bpp_dataset::SceneStagingArea,
-        >,
+    R: bpp_render_api::Renderer,
 {
-    let mut pipeline = match bpp_pipeline::SerialGenerationPipeline::try_new(
-        loaded.config.plan(),
-        prepared.shared_physics_assets(),
-        renderer,
-        output,
-    ) {
-        Ok(pipeline) => pipeline,
+    let plan = loaded.config.plan();
+    let catalog = prepared.visual_assets();
+    let result = if plan.run().simulation_workers() > 1 {
+        bpp_pipeline::ParallelGenerationPipeline::try_new(
+            plan,
+            prepared.shared_physics_assets(),
+            renderer,
+            output,
+        )
+        .map(|mut pipeline| pipeline.run_to_completion(&loaded.bytes, catalog))
+    } else {
+        bpp_pipeline::SerialGenerationPipeline::try_new(
+            plan,
+            prepared.shared_physics_assets(),
+            renderer,
+            output,
+        )
+        .map(|mut pipeline| pipeline.run_to_completion(&loaded.bytes, catalog))
+    };
+    let result = match result {
+        Ok(result) => result,
         Err(error) => return configuration_error(&format!("generation setup failed: {error}")),
     };
-    match pipeline.run_to_completion(&loaded.bytes, prepared.visual_assets()) {
+    match result {
         Ok(report) => print_run_report(report),
         Err(error) => {
             eprintln!("generation failed: {error}");
             match error {
-                bpp_pipeline::SerialGenerationPipelineError::Physics(_) => ExitCode::from(4),
+                bpp_pipeline::SerialGenerationPipelineError::Physics(_)
+                | bpp_pipeline::SerialGenerationPipelineError::ParallelPhysics(_) => {
+                    ExitCode::from(4)
+                }
+                bpp_pipeline::SerialGenerationPipelineError::InvalidExecutor(_) => {
+                    ExitCode::from(2)
+                }
                 bpp_pipeline::SerialGenerationPipelineError::Render(_)
                 | bpp_pipeline::SerialGenerationPipelineError::RendererLifecycle(_) => {
                     ExitCode::from(6)

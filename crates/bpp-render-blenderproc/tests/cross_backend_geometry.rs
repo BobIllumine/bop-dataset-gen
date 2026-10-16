@@ -6,10 +6,11 @@ use bpp_assets::{
     ConvexPart, NormalizedAsset, ResolvedAsset, ResolvedAssetCatalog, VisualMesh, VisualPrimitive,
 };
 use bpp_core::{
-    AssetId, BlenderProcRendererConfig, CameraId, RenderSceneRequest, Renderer,
-    WgpuAdapterPreference, WgpuDevicePreference, WgpuRendererConfig,
+    AssetId, BlenderProcRendererConfig, CameraId, RenderSceneRequest, WgpuAdapterPreference,
+    WgpuDevicePreference, WgpuRendererConfig,
 };
 use bpp_dataset::SceneStagingArea;
+use bpp_render_api::Renderer;
 use bpp_render_blenderproc::BlenderProcRenderer;
 use bpp_render_wgpu::WgpuRenderer;
 use exr::prelude::{ReadChannels as _, ReadLayers as _, ReadSpecificChannel as _, read};

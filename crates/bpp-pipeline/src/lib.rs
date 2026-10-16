@@ -3,6 +3,7 @@
 mod asset_preparation;
 mod benchmark;
 mod cancellation;
+mod parallel_generation;
 mod parallel_physics;
 mod request_planner;
 mod serial_generation;
@@ -11,9 +12,10 @@ mod snapshot_pipeline;
 pub use asset_preparation::{AssetPreparationError, PreparedAssetCatalog, prepare_asset_catalog};
 pub use benchmark::{InvalidRenderBenchmarkSummary, RenderBenchmarkSummary};
 pub use cancellation::CancellationToken;
+pub use parallel_generation::{ParallelGenerationPipeline, ParallelSnapshotSimulator};
 pub use parallel_physics::{
     InvalidParallelPhysicsExecutor, ParallelPhysicsExecutor, PhysicsSimulator, PhysicsStageReport,
-    PipelineError, SimulatorFactory,
+    PipelineError, RapierSimulator, RapierSimulatorFactory, SimulatorFactory,
 };
 pub use request_planner::{RenderRequestPlanner, RenderRequestPlanningError};
 pub use serial_generation::{
@@ -53,11 +55,12 @@ use std::{
 };
 
 use bpp_assets::ResolvedAssetCatalog;
-use bpp_core::{RenderError, RenderReport, RenderSceneRequest, Renderer};
+use bpp_core::{RenderError, RenderReport, RenderSceneRequest};
 use bpp_dataset::{
     DatasetValidationError, SceneArtifactRequirements, SceneCommitError, SceneStagingArea,
     validate_and_write_checksums,
 };
+use bpp_render_api::Renderer;
 use thiserror::Error;
 
 /// Single-owner synchronous renderer orchestration with transactional output.
@@ -68,7 +71,7 @@ pub struct SerialDatasetRenderer<R> {
 
 impl<R> SerialDatasetRenderer<R>
 where
-    R: Renderer<AssetCatalog = ResolvedAssetCatalog, StagingArea = SceneStagingArea>,
+    R: Renderer,
 {
     /// Creates a serial renderer pipeline targeting `dataset_root`.
     #[must_use]

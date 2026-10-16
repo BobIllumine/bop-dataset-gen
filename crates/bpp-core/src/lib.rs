@@ -5,9 +5,9 @@ mod cameras;
 mod deterministic_planning;
 mod distributions;
 mod identifiers;
+mod render_error;
 mod render_reports;
 mod render_requests;
-mod renderer;
 mod run_config;
 mod run_config_wire;
 mod scenes;
@@ -33,6 +33,7 @@ pub use identifiers::{
     AssetId, AttemptId, CameraId, InstanceId, InvalidAssetIdError, InvalidInstanceIdError,
     InvalidSchemaVersionError, SceneId, SchemaVersion,
 };
+pub use render_error::RenderError;
 pub use render_reports::{
     BackendInfo, BackendKind, InvalidBackendInfoError, RenderReport, RenderStageTimings,
     RendererCapabilities,
@@ -40,7 +41,6 @@ pub use render_reports::{
 pub use render_requests::{
     InvalidRenderChannelsError, InvalidRenderSceneRequestError, RenderChannels, RenderSceneRequest,
 };
-pub use renderer::{RenderError, Renderer};
 pub use run_config::{
     AppearanceConfig, AppearanceField, AssetConfig, Axis, BinConfig, BlenderProcRendererConfig,
     CameraConfig, CameraPose, CameraProjection, CameraShellField, ConfigCountField,

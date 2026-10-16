@@ -1,17 +1,23 @@
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use bpp_assets::ResolvedAssetCatalog;
-use bpp_core::{AssetId, RenderError, Renderer, RunPlan, SceneId};
+use bpp_core::{AssetId, BackendInfo, RenderError, RunPlan, SceneId};
 use bpp_dataset::{
-    DatasetManifest, DatasetManifestError, DatasetOpenError, DatasetResumeIndex, SceneStagingArea,
+    DatasetManifest, DatasetManifestError, DatasetOpenError, DatasetResumeIndex,
     persist_run_environment,
 };
 use bpp_physics_rapier::{PreparedPhysicsAsset, SceneGenerationError, SerialPhysicsGenerator};
+use bpp_render_api::Renderer;
 use thiserror::Error;
 
 use crate::{
-    CancellationToken, CompletedScene, PipelineRenderError, RenderRequestPlanner,
-    RenderRequestPlanningError, SerialDatasetRenderer, current_run_environment,
+    CancellationToken, CompletedScene, InvalidParallelPhysicsExecutor, PipelineError,
+    PipelineRenderError, RenderRequestPlanner, RenderRequestPlanningError, SerialDatasetRenderer,
+    current_run_environment,
 };
 
 /// Single-threaded reference composition of physics, request planning, rendering, and commit.
@@ -25,7 +31,7 @@ pub struct SerialGenerationPipeline<R> {
 
 impl<R> SerialGenerationPipeline<R>
 where
-    R: Renderer<AssetCatalog = ResolvedAssetCatalog, StagingArea = SceneStagingArea>,
+    R: Renderer,
 {
     /// Compiles immutable physics and render planning state.
     ///
@@ -117,17 +123,13 @@ where
         catalog: &ResolvedAssetCatalog,
         cancellation: &CancellationToken,
     ) -> Result<SerialRunReport, SerialGenerationPipelineError> {
-        let manifest = DatasetManifest::try_new(
+        let (resume, preexisting_scene_count) = open_dataset_run(
+            &self.dataset_root,
             resolved_config_bytes,
-            catalog.fingerprint(),
+            catalog,
             self.dataset.renderer().info(),
             self.total_scene_count,
         )?;
-        let resume = DatasetResumeIndex::open_or_create(&self.dataset_root, manifest)?;
-        resume.persist_resolved_config(&self.dataset_root, resolved_config_bytes)?;
-        persist_run_environment(&self.dataset_root, &current_run_environment())?;
-        let preexisting_scene_count = u64::try_from(resume.committed_scenes().len())
-            .map_err(|_| SerialGenerationPipelineError::SceneCountOverflow)?;
 
         if cancellation.is_cancelled() {
             return Ok(SerialRunReport {
@@ -156,6 +158,30 @@ where
             was_cancelled: cancellation.is_cancelled(),
         })
     }
+}
+
+/// Opens or resumes a dataset and persists its resolved configuration and environment.
+///
+/// Returns the resume index and the number of scenes committed before this run.
+pub(crate) fn open_dataset_run(
+    dataset_root: &Path,
+    resolved_config_bytes: &[u8],
+    catalog: &ResolvedAssetCatalog,
+    backend: BackendInfo,
+    total_scene_count: u64,
+) -> Result<(DatasetResumeIndex, u64), SerialGenerationPipelineError> {
+    let manifest = DatasetManifest::try_new(
+        resolved_config_bytes,
+        catalog.fingerprint(),
+        backend,
+        total_scene_count,
+    )?;
+    let resume = DatasetResumeIndex::open_or_create(dataset_root, manifest)?;
+    resume.persist_resolved_config(dataset_root, resolved_config_bytes)?;
+    persist_run_environment(dataset_root, &current_run_environment())?;
+    let preexisting_scene_count = u64::try_from(resume.committed_scenes().len())
+        .map_err(|_| SerialGenerationPipelineError::SceneCountOverflow)?;
+    Ok((resume, preexisting_scene_count))
 }
 
 /// Deterministic completion counts for one serial run invocation.
@@ -228,6 +254,12 @@ pub enum SerialGenerationPipelineError {
     /// Renderer preparation or flushing failed.
     #[error(transparent)]
     RendererLifecycle(#[from] RenderError),
+    /// The parallel physics stage failed.
+    #[error(transparent)]
+    ParallelPhysics(#[from] PipelineError),
+    /// The configured worker count or queue capacity is zero.
+    #[error(transparent)]
+    InvalidExecutor(#[from] InvalidParallelPhysicsExecutor),
     /// A platform collection length could not fit the protocol count.
     #[error("scene count cannot be represented as u64")]
     SceneCountOverflow,

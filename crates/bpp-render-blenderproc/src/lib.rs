@@ -13,9 +13,10 @@ use std::{
 use bpp_assets::{ResolvedAssetCatalog, Texture};
 use bpp_core::{
     BackendInfo, BackendKind, BlenderProcRendererConfig, NonNegativeFinite, RenderError,
-    RenderReport, RenderSceneRequest, RenderStageTimings, Renderer, RendererCapabilities,
+    RenderReport, RenderSceneRequest, RenderStageTimings, RendererCapabilities,
 };
 use bpp_dataset::{DepthFrame, InstanceFrame, RgbFrame, SceneStagingArea};
+use bpp_render_api::Renderer;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
@@ -213,9 +214,6 @@ impl BlenderProcRenderer {
 }
 
 impl Renderer for BlenderProcRenderer {
-    type AssetCatalog = ResolvedAssetCatalog;
-    type StagingArea = SceneStagingArea;
-
     fn info(&self) -> BackendInfo {
         self.info()
     }
@@ -224,7 +222,7 @@ impl Renderer for BlenderProcRenderer {
         self.capabilities
     }
 
-    fn prepare(&mut self, assets: &Self::AssetCatalog) -> Result<(), RenderError> {
+    fn prepare(&mut self, assets: &ResolvedAssetCatalog) -> Result<(), RenderError> {
         let request_id = self.allocate_request_id()?;
         let payload = json!({
             "protocol_version": PROTOCOL_VERSION,
@@ -256,7 +254,7 @@ impl Renderer for BlenderProcRenderer {
     fn render_scene(
         &mut self,
         request: &RenderSceneRequest,
-        staging: &Self::StagingArea,
+        staging: &SceneStagingArea,
     ) -> Result<RenderReport, RenderError> {
         if self.prepared_fingerprint.is_none() {
             return Err(RenderError::NotPrepared);

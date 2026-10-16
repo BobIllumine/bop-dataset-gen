@@ -11,10 +11,11 @@ use bpp_assets::{ResolvedAssetCatalog, VisualPrimitive};
 use bpp_core::{
     AppearanceSnapshot, BackendInfo, BackendKind, CameraSnapshot, InvalidBackendInfoError,
     NonNegativeFinite, RenderChannels, RenderError, RenderReport, RenderSceneRequest,
-    RenderStageTimings, Renderer, RendererCapabilities, RigidTransform, SceneSnapshot,
-    WgpuAdapterPreference, WgpuDevicePreference, WgpuRendererConfig,
+    RenderStageTimings, RendererCapabilities, RigidTransform, SceneSnapshot, WgpuAdapterPreference,
+    WgpuDevicePreference, WgpuRendererConfig,
 };
 use bpp_dataset::{DepthFrame, InstanceFrame, RgbFrame, SceneStagingArea};
+use bpp_render_api::Renderer;
 use thiserror::Error;
 use wgpu::util::DeviceExt as _;
 
@@ -1148,9 +1149,6 @@ enum WgpuSceneError {
 }
 
 impl Renderer for WgpuRenderer {
-    type AssetCatalog = ResolvedAssetCatalog;
-    type StagingArea = SceneStagingArea;
-
     fn info(&self) -> BackendInfo {
         WgpuRenderer::info(self)
     }
@@ -1159,7 +1157,7 @@ impl Renderer for WgpuRenderer {
         WgpuRenderer::capabilities(self)
     }
 
-    fn prepare(&mut self, assets: &Self::AssetCatalog) -> Result<(), RenderError> {
+    fn prepare(&mut self, assets: &ResolvedAssetCatalog) -> Result<(), RenderError> {
         WgpuRenderer::prepare(self, assets)
             .map(|_| ())
             .map_err(|error| RenderError::InvalidContent {
@@ -1170,7 +1168,7 @@ impl Renderer for WgpuRenderer {
     fn render_scene(
         &mut self,
         request: &RenderSceneRequest,
-        staging: &Self::StagingArea,
+        staging: &SceneStagingArea,
     ) -> Result<RenderReport, RenderError> {
         if self.prepared.is_none() {
             return Err(RenderError::NotPrepared);
@@ -2002,9 +2000,8 @@ mod tests {
         ConvexPart, NormalizedAsset, ResolvedAsset, ResolvedAssetCatalog, VisualMesh,
         VisualPrimitive,
     };
-    use bpp_core::{
-        AssetId, RenderSceneRequest, Renderer, WgpuAdapterPreference, WgpuDevicePreference,
-    };
+    use bpp_core::{AssetId, RenderSceneRequest, WgpuAdapterPreference, WgpuDevicePreference};
+    use bpp_render_api::Renderer;
 
     use super::{
         MappingCompletionError, adapter_rank, directional_shadow_matrix, pack_vertices,

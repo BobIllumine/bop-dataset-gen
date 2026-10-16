@@ -1,22 +1,24 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use bpp_assets::ResolvedAssetCatalog;
-use bpp_core::{AssetId, RenderError, Renderer, RunPlan, SceneId};
+use bpp_core::{AssetId, RenderError, RunPlan, SceneId};
 use bpp_dataset::{
-    DatasetManifest, DatasetManifestError, DatasetOpenError, DatasetResumeIndex, SceneStagingArea,
+    DatasetManifest, DatasetManifestError, DatasetOpenError, DatasetResumeIndex,
     SnapshotCorpusError, SnapshotCorpusOpenError, open_snapshot_corpus, persist_run_environment,
     read_run_environment, read_snapshot_corpus, validate_snapshot_corpus, write_scene_snapshot,
 };
 use bpp_physics_rapier::{PreparedPhysicsAsset, SceneGenerationError, SerialPhysicsGenerator};
+use bpp_render_api::Renderer;
 use thiserror::Error;
 
 use crate::{
-    CancellationToken, PipelineRenderError, RenderRequestPlanner, RenderRequestPlanningError,
-    SerialDatasetRenderer, SerialRunReport, current_run_environment,
+    CancellationToken, InvalidParallelPhysicsExecutor, PipelineError, PipelineRenderError,
+    RenderRequestPlanner, RenderRequestPlanningError, SerialDatasetRenderer, SerialRunReport,
+    current_run_environment,
 };
 
 /// Serial physics-only executor that atomically publishes renderer-neutral scene snapshots.
@@ -56,32 +58,12 @@ impl SerialSnapshotSimulator {
         corpus_root: &Path,
         cancellation: &CancellationToken,
     ) -> Result<SerialRunReport, SerialSnapshotSimulationError> {
-        open_snapshot_corpus(
-            corpus_root,
+        let (preexisting_scene_count, existing) = open_simulation_corpus(
             resolved_config_bytes,
             asset_catalog_fingerprint,
+            corpus_root,
             self.total_scene_count,
         )?;
-        persist_run_environment(corpus_root, &current_run_environment())?;
-        let existing = if corpus_root.join("scenes").exists() {
-            read_snapshot_corpus(corpus_root)?
-        } else {
-            Vec::new()
-        };
-        for scene in &existing {
-            if scene.scene_id().get() >= self.total_scene_count {
-                return Err(SerialSnapshotSimulationError::SceneOutsideRun {
-                    scene_id: scene.scene_id(),
-                    total_scene_count: self.total_scene_count,
-                });
-            }
-        }
-        let preexisting_scene_count = u64::try_from(existing.len())
-            .map_err(|_| SerialSnapshotSimulationError::SceneCountOverflow)?;
-        let existing = existing
-            .into_iter()
-            .map(|scene| scene.scene_id())
-            .collect::<std::collections::BTreeSet<_>>();
         let mut generated_scene_count = 0;
         for value in 0..self.total_scene_count {
             if cancellation.is_cancelled() {
@@ -104,6 +86,41 @@ impl SerialSnapshotSimulator {
     }
 }
 
+/// Opens or resumes a snapshot corpus and persists its environment.
+///
+/// Returns the number of snapshots already present and their scene IDs.
+pub(crate) fn open_simulation_corpus(
+    resolved_config_bytes: &[u8],
+    asset_catalog_fingerprint: &str,
+    corpus_root: &Path,
+    total_scene_count: u64,
+) -> Result<(u64, BTreeSet<SceneId>), SerialSnapshotSimulationError> {
+    open_snapshot_corpus(
+        corpus_root,
+        resolved_config_bytes,
+        asset_catalog_fingerprint,
+        total_scene_count,
+    )?;
+    persist_run_environment(corpus_root, &current_run_environment())?;
+    let existing = if corpus_root.join("scenes").exists() {
+        read_snapshot_corpus(corpus_root)?
+    } else {
+        Vec::new()
+    };
+    for scene in &existing {
+        if scene.scene_id().get() >= total_scene_count {
+            return Err(SerialSnapshotSimulationError::SceneOutsideRun {
+                scene_id: scene.scene_id(),
+                total_scene_count,
+            });
+        }
+    }
+    let preexisting_scene_count = u64::try_from(existing.len())
+        .map_err(|_| SerialSnapshotSimulationError::SceneCountOverflow)?;
+    let existing = existing.into_iter().map(|scene| scene.scene_id()).collect();
+    Ok((preexisting_scene_count, existing))
+}
+
 /// Serial render-only executor consuming an immutable snapshot corpus.
 pub struct SerialSnapshotRenderer<R> {
     requests: RenderRequestPlanner,
@@ -114,7 +131,7 @@ pub struct SerialSnapshotRenderer<R> {
 
 impl<R> SerialSnapshotRenderer<R>
 where
-    R: Renderer<AssetCatalog = ResolvedAssetCatalog, StagingArea = SceneStagingArea>,
+    R: Renderer,
 {
     /// Captures checked render planning and the owned renderer.
     #[must_use]
@@ -239,6 +256,12 @@ pub enum SerialSnapshotSimulationError {
     /// Snapshot storage failed.
     #[error(transparent)]
     Corpus(#[from] SnapshotCorpusError),
+    /// The parallel physics stage failed.
+    #[error(transparent)]
+    ParallelPhysics(#[from] PipelineError),
+    /// The configured worker count or queue capacity is zero.
+    #[error(transparent)]
+    InvalidExecutor(#[from] InvalidParallelPhysicsExecutor),
     /// An existing scene is outside the configured run domain.
     #[error("snapshot scene {scene_id:?} is outside total count {total_scene_count}")]
     SceneOutsideRun {

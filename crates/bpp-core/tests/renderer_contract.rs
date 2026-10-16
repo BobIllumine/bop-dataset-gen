@@ -1,59 +1,19 @@
-//! Public object-safe renderer boundary and capability preflight contracts.
+//! Capability preflight and retry classification contracts.
 
-use std::{collections::BTreeMap, num::NonZeroU32};
+use std::num::NonZeroU32;
 
-use bpp_core::{
-    BackendInfo, BackendKind, RenderChannels, RenderError, RenderReport, RenderSceneRequest,
-    Renderer, RendererCapabilities,
-};
+use bpp_core::{RenderChannels, RenderError, RendererCapabilities};
 
-struct ContractRenderer;
-
-impl Renderer for ContractRenderer {
-    type AssetCatalog = ();
-    type StagingArea = ();
-
-    fn info(&self) -> BackendInfo {
-        BackendInfo::try_new(BackendKind::Wgpu, "test", None, BTreeMap::default()).unwrap()
-    }
-
-    fn capabilities(&self) -> RendererCapabilities {
-        RendererCapabilities::new(
-            RenderChannels::try_new(true, true, false).unwrap(),
-            Some(NonZeroU32::new(2).unwrap()),
-        )
-    }
-
-    fn prepare(&mut self, _assets: &Self::AssetCatalog) -> Result<(), RenderError> {
-        Ok(())
-    }
-
-    fn render_scene(
-        &mut self,
-        _request: &RenderSceneRequest,
-        _staging: &Self::StagingArea,
-    ) -> Result<RenderReport, RenderError> {
-        Err(RenderError::NotPrepared)
-    }
-
-    fn flush(&mut self) -> Result<(), RenderError> {
-        Ok(())
-    }
-}
-
-#[test]
-fn renderer_is_an_object_safe_single_owner_boundary() {
-    let mut renderer: Box<dyn Renderer<AssetCatalog = (), StagingArea = ()>> =
-        Box::new(ContractRenderer);
-
-    assert_eq!(renderer.info().kind(), BackendKind::Wgpu);
-    renderer.prepare(&()).unwrap();
-    renderer.flush().unwrap();
+fn capabilities() -> RendererCapabilities {
+    RendererCapabilities::new(
+        RenderChannels::try_new(true, true, false).unwrap(),
+        Some(NonZeroU32::new(2).unwrap()),
+    )
 }
 
 #[test]
 fn capability_preflight_reports_channels_and_camera_limits_exactly() {
-    let capabilities = ContractRenderer.capabilities();
+    let capabilities = capabilities();
     let unsupported_channels = RenderChannels::try_new(false, false, true).unwrap();
 
     assert!(matches!(

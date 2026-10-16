@@ -7,13 +7,16 @@ use bpp_assets::{
 };
 use bpp_core::{
     AssetId, BackendInfo, BackendKind, NonNegativeFinite, RenderChannels, RenderError,
-    RenderReport, RenderSceneRequest, RenderStageTimings, Renderer, RendererCapabilities,
-    RunConfig, SceneId,
+    RenderReport, RenderSceneRequest, RenderStageTimings, RendererCapabilities, RunConfig, SceneId,
 };
 use bpp_dataset::{DepthFrame, InstanceFrame, RgbFrame, SceneStagingArea};
 use bpp_physics_rapier::PreparedPhysicsAsset;
-use bpp_pipeline::{CancellationToken, SerialSnapshotRenderer, SerialSnapshotSimulator};
+use bpp_pipeline::{
+    CancellationToken, ParallelGenerationPipeline, ParallelSnapshotSimulator,
+    SerialSnapshotRenderer, SerialSnapshotSimulator,
+};
 use bpp_pipeline::{PipelineRenderError, SerialDatasetRenderer, SerialGenerationPipeline};
+use bpp_render_api::Renderer;
 
 const REQUEST_JSON: &str = r#"{"schema_version":1,"scene":{"schema_version":1,"scene_id":9,"accepted_attempt":2,"seed_fingerprint":"seed-abc","bin":{"schema_version":1,"inner_dimensions_m":[1.0,2.0,3.0],"floor_thickness_m":0.1,"wall_thickness_m":0.2,"world_from_bin":{"translation":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]},"material_label":"steel"},"instances":[],"physics":{"schema_version":1,"attempts":1,"steps":50,"simulated_seconds":1.0,"final_max_linear_speed_mps":0.1,"final_max_angular_speed_rad_s":0.2,"final_max_penetration_m":0.0,"rejection_counts":[]}},"cameras":[{"schema_version":1,"camera_id":2,"image_size":{"width":2,"height":2},"k":[2.0,0.0,1.0,0.0,2.0,1.0,0.0,0.0,1.0],"camera_from_world":{"camera_from_world":{"translation":[0.0,0.0,0.0],"rotation_xyzw":[0.0,0.0,0.0,1.0]}},"near_m":0.1,"far_m":10.0}],"appearance":{"schema_version":1,"background_srgb":[0.1,0.2,0.3,1.0],"ambient_light":{"schema_version":1,"color":[1.0,1.0,1.0],"intensity":0.25},"directional_lights":[],"point_lights":[]},"required_channels":{"schema_version":1,"rgb":true,"depth":true,"instance":true}}"#;
 
@@ -54,9 +57,6 @@ impl FakeRenderer {
 }
 
 impl Renderer for FakeRenderer {
-    type AssetCatalog = ResolvedAssetCatalog;
-    type StagingArea = SceneStagingArea;
-
     fn info(&self) -> BackendInfo {
         BackendInfo::try_new(
             BackendKind::Wgpu,
@@ -71,7 +71,7 @@ impl Renderer for FakeRenderer {
         self.capabilities
     }
 
-    fn prepare(&mut self, _assets: &Self::AssetCatalog) -> Result<(), RenderError> {
+    fn prepare(&mut self, _assets: &ResolvedAssetCatalog) -> Result<(), RenderError> {
         self.prepared = true;
         Ok(())
     }
@@ -79,7 +79,7 @@ impl Renderer for FakeRenderer {
     fn render_scene(
         &mut self,
         request: &RenderSceneRequest,
-        staging: &Self::StagingArea,
+        staging: &SceneStagingArea,
     ) -> Result<RenderReport, RenderError> {
         if !self.prepared {
             return Err(RenderError::NotPrepared);
@@ -498,4 +498,175 @@ fn render_only_pipeline_stops_after_the_in_flight_scene_and_resumes() {
         .unwrap();
     assert_eq!(report.preexisting_scene_count(), 1);
     assert_eq!(report.generated_scene_count(), 1);
+}
+
+fn parallel_config(scene_count: u32) -> String {
+    include_str!("fixtures/serial_run.toml")
+        .replace(
+            "valid_scene_count = 1",
+            &format!("valid_scene_count = {scene_count}"),
+        )
+        .replace("simulation_workers = 1", "simulation_workers = 3")
+        .replace("queue_capacity = 1", "queue_capacity = 2")
+}
+
+/// Reads every file under `root`, keyed by its path relative to `root`.
+fn tree_bytes(root: &std::path::Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    let mut pending = vec![root.to_owned()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let relative = path.strip_prefix(root).unwrap().to_owned();
+                files.insert(relative, fs::read(&path).unwrap());
+            }
+        }
+    }
+    files
+}
+
+#[test]
+fn parallel_simulation_writes_the_same_corpus_as_serial_simulation() {
+    let resolved_config = parallel_config(5);
+    let plan = RunConfig::from_toml(&resolved_config).unwrap().into_plan();
+    let fingerprint = catalog().fingerprint().to_owned();
+    let serial_root = tempfile::tempdir().unwrap();
+    let parallel_root = tempfile::tempdir().unwrap();
+
+    let serial = SerialSnapshotSimulator::try_new(&plan, prepared_assets())
+        .unwrap()
+        .run(
+            resolved_config.as_bytes(),
+            &fingerprint,
+            serial_root.path(),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let parallel = ParallelSnapshotSimulator::try_new(&plan, prepared_assets())
+        .unwrap()
+        .run(
+            resolved_config.as_bytes(),
+            &fingerprint,
+            parallel_root.path(),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+    assert_eq!(serial, parallel);
+    assert_eq!(parallel.generated_scene_count(), 5);
+    let scenes = tree_bytes(&parallel_root.path().join("scenes"));
+    assert_eq!(scenes.len(), 5);
+    assert_eq!(tree_bytes(&serial_root.path().join("scenes")), scenes);
+}
+
+#[test]
+fn parallel_simulation_resumes_without_regenerating_existing_snapshots() {
+    let resolved_config = parallel_config(4);
+    let plan = RunConfig::from_toml(&resolved_config).unwrap().into_plan();
+    let fingerprint = catalog().fingerprint().to_owned();
+    let root = tempfile::tempdir().unwrap();
+    let simulator = ParallelSnapshotSimulator::try_new(&plan, prepared_assets()).unwrap();
+
+    let first = simulator
+        .run(
+            resolved_config.as_bytes(),
+            &fingerprint,
+            root.path(),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let second = simulator
+        .run(
+            resolved_config.as_bytes(),
+            &fingerprint,
+            root.path(),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+    assert_eq!(first.generated_scene_count(), 4);
+    assert_eq!(second.preexisting_scene_count(), 4);
+    assert_eq!(second.generated_scene_count(), 0);
+}
+
+#[test]
+fn parallel_generation_commits_the_same_scenes_as_serial_generation() {
+    let resolved_config = parallel_config(5);
+    let plan = RunConfig::from_toml(&resolved_config).unwrap().into_plan();
+    let visual_catalog = catalog();
+    let serial_root = tempfile::tempdir().unwrap();
+    let parallel_root = tempfile::tempdir().unwrap();
+
+    SerialGenerationPipeline::try_new(
+        &plan,
+        prepared_assets(),
+        FakeRenderer::all_channels(),
+        serial_root.path(),
+    )
+    .unwrap()
+    .run_to_completion(resolved_config.as_bytes(), &visual_catalog)
+    .unwrap();
+    let report = ParallelGenerationPipeline::try_new(
+        &plan,
+        prepared_assets(),
+        FakeRenderer::all_channels(),
+        parallel_root.path(),
+    )
+    .unwrap()
+    .run_to_completion(resolved_config.as_bytes(), &visual_catalog)
+    .unwrap();
+
+    assert_eq!(report.generated_scene_count(), 5);
+    assert!(!report.was_cancelled());
+    let scenes = |root: &std::path::Path| {
+        (0..5)
+            .map(|id| fs::read(root.join(format!("scenes/{id:020}/scene.json"))).unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(scenes(parallel_root.path()), scenes(serial_root.path()));
+}
+
+#[test]
+fn parallel_generation_stops_after_cancellation_and_resumes() {
+    let resolved_config = parallel_config(6);
+    let plan = RunConfig::from_toml(&resolved_config).unwrap().into_plan();
+    let visual_catalog = catalog();
+    let root = tempfile::tempdir().unwrap();
+    let cancellation = CancellationToken::new();
+
+    let interrupted = ParallelGenerationPipeline::try_new(
+        &plan,
+        prepared_assets(),
+        FakeRenderer::cancelling(cancellation.clone()),
+        root.path(),
+    )
+    .unwrap()
+    .run_until_cancelled(resolved_config.as_bytes(), &visual_catalog, &cancellation)
+    .unwrap();
+    assert!(interrupted.was_cancelled());
+    assert_eq!(interrupted.generated_scene_count(), 1);
+    assert!(
+        root.path()
+            .join(".staging")
+            .read_dir()
+            .unwrap()
+            .next()
+            .is_none()
+    );
+
+    let resumed = ParallelGenerationPipeline::try_new(
+        &plan,
+        prepared_assets(),
+        FakeRenderer::all_channels(),
+        root.path(),
+    )
+    .unwrap()
+    .run_to_completion(resolved_config.as_bytes(), &visual_catalog)
+    .unwrap();
+    assert_eq!(resumed.preexisting_scene_count(), 1);
+    assert_eq!(resumed.generated_scene_count(), 5);
+    assert_eq!(root.path().join("scenes").read_dir().unwrap().count(), 6);
 }

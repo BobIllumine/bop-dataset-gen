@@ -1,0 +1,15 @@
+[package]
+name = "bpp-render-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bpp-assets = { path = "../bpp-assets" }
+bpp-core = { path = "../bpp-core" }
+bpp-dataset = { path = "../bpp-dataset" }

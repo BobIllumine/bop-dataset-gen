@@ -25,6 +25,7 @@ bpp-pipeline = { path = "../bpp-pipeline", default-features = false }
 bpp-assets = { path = "../bpp-assets" }
 bpp-dataset = { path = "../bpp-dataset" }
 bpp-core = { path = "../bpp-core", features = ["schema"] }
+bpp-render-api = { path = "../bpp-render-api" }
 bpp-render-wgpu = { path = "../bpp-render-wgpu", optional = true }
 bpp-render-blenderproc = { path = "../bpp-render-blenderproc", optional = true }
 serde_json = { version = "1" }

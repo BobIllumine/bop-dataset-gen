@@ -1,50 +1,6 @@
 use thiserror::Error;
 
-use crate::{BackendInfo, RenderChannels, RenderReport, RenderSceneRequest, RendererCapabilities};
-
-/// Synchronous, scene-batched renderer owned mutably by one execution worker.
-///
-/// Associated boundary types keep this core trait independent of asset and
-/// filesystem crates while remaining object-safe once those types are fixed by
-/// the pipeline. Implementations must not perform implicit backend fallback.
-pub trait Renderer: Send {
-    /// Shared renderer-neutral asset catalog type.
-    type AssetCatalog: ?Sized;
-    /// Per-scene staging-area type.
-    type StagingArea: ?Sized;
-
-    /// Returns immutable backend identity and provenance.
-    fn info(&self) -> BackendInfo;
-
-    /// Returns channels and scene batching limits supported by this instance.
-    fn capabilities(&self) -> RendererCapabilities;
-
-    /// Prepares persistent backend resources for the complete asset catalog.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed capability, resource, content, or backend error without
-    /// silently selecting a different renderer.
-    fn prepare(&mut self, assets: &Self::AssetCatalog) -> Result<(), RenderError>;
-
-    /// Renders every camera in one immutable request into an isolated staging area.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed error without publishing a partial dataset scene.
-    fn render_scene(
-        &mut self,
-        request: &RenderSceneRequest,
-        staging: &Self::StagingArea,
-    ) -> Result<RenderReport, RenderError>;
-
-    /// Completes pending backend work before shutdown or a durability boundary.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed backend error if queued work cannot be completed.
-    fn flush(&mut self) -> Result<(), RenderError>;
-}
+use crate::{RenderChannels, RendererCapabilities};
 
 /// Renderer failure category shared by in-process and supervised backends.
 #[derive(Clone, Debug, Error, PartialEq)]
