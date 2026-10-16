@@ -4,3 +4,7 @@ superpowers/
 /.idea
 .DS_Store
 codex-session-*.md
+
+# LEARN exercises are kept locally only.
+/docs/book/learn-*.md
+/crates/bpp-pipeline/tests/learn_02.rs

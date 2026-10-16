@@ -57,7 +57,7 @@ impl SeedStage {
 /// same output, while changing any tuple component must select a different
 /// stream. Native-endian encoding, debug formatting, string concatenation,
 /// `DefaultHasher`, and a global RNG are not protocol-compatible substitutes.
-/// The protocol is locked by known vectors in `tests/learn_01.rs`.
+/// The protocol is locked by known vectors in `tests/seed_derivation.rs`.
 ///
 /// The value stays immutable after construction. [`SeedDeriver::derive`] takes
 /// `&self`, advances no RNG cursor, and needs no mutex, so scheduling order

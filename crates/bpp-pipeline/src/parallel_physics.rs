@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::CancellationToken;
 
-/// Worker-local physics engine used by the LEARN-02 executor.
+/// Worker-local physics engine used by the parallel executor.
 pub trait PhysicsSimulator: Send {
     /// Generates one accepted renderer-neutral scene.
     ///
@@ -28,7 +28,7 @@ pub trait SimulatorFactory: Sync {
     fn create(&self) -> Result<Self::Simulator, PipelineError>;
 }
 
-/// Bounded parallel physics configuration reserved for LEARN-02.
+/// Bounded parallel physics configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ParallelPhysicsExecutor {
     /// Number of worker-local simulators in the dedicated Rayon pool.
@@ -57,9 +57,6 @@ impl ParallelPhysicsExecutor {
 
     /// Runs bounded parallel physics generation.
     ///
-    /// LEARN-02 owns this method body. See `docs/book/learn-02.md` for the
-    /// scheduling protocol, failure rules, and verification commands.
-    ///
     /// # Errors
     ///
     /// Returns the first fatal worker, simulation, panic, or receiver-drop error.
@@ -70,7 +67,7 @@ impl ParallelPhysicsExecutor {
         _accepted: crossbeam_channel::Sender<SceneSnapshot>,
         _cancellation: &CancellationToken,
     ) -> Result<PhysicsStageReport, PipelineError> {
-        todo!("LEARN-02: implement bounded Rayon physics scheduling")
+        todo!("bounded Rayon physics scheduling is not implemented yet")
     }
 }
 
@@ -115,7 +112,7 @@ impl PhysicsStageReport {
     }
 }
 
-/// Fatal failure propagated by the LEARN-02 physics stage.
+/// Fatal failure propagated by the parallel physics stage.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum PipelineError {
     /// A worker-local simulator failed.
