@@ -1,0 +1,99 @@
+name: Release
+
+# Push a tag like v0.1.0 (matching the workspace version) to build and publish
+# the `bpp` binaries. Tags with a suffix, such as v0.2.0-rc.1, publish a
+# prerelease.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: Tag matches workspace version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - run: |
+          version=$(cargo metadata --no-deps --format-version 1 --locked \
+            | jq -r '.packages[] | select(.name == "bpp-cli") | .version')
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match workspace version ${version}"
+            exit 1
+          fi
+
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Build ${{ matrix.target }} (${{ matrix.variant }})
+    needs: [version, ci]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-apple-darwin, x86_64-apple-darwin]
+        variant: [fast, reproducible]
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install && rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}-${{ matrix.variant }}
+      - run: >
+          cargo build --release --locked -p bpp-cli
+          --target ${{ matrix.target }}
+          --no-default-features --features ${{ matrix.variant }},wgpu,blenderproc
+      - name: Package
+        run: |
+          name="bpp-${GITHUB_REF_NAME}-${{ matrix.variant }}-${{ matrix.target }}"
+          stage="dist/${name}"
+          mkdir -p "${stage}/schemas" "${stage}/blenderproc-worker"
+          cp "target/${{ matrix.target }}/release/bpp" "${stage}/"
+          cp LICENSE README.md "${stage}/"
+          cp schemas/run-config.schema.json "${stage}/schemas/"
+          cp tools/blenderproc-worker/blenderproc_worker.py \
+             tools/blenderproc-worker/pyproject.toml \
+             tools/blenderproc-worker/uv.lock "${stage}/blenderproc-worker/"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          (cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bpp-${{ matrix.variant }}-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=""
+          case "${GITHUB_REF_NAME}" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --verify-tag --generate-notes --title "bpp ${GITHUB_REF_NAME}" ${prerelease}

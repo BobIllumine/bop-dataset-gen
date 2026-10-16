@@ -1,0 +1,97 @@
+name: Hardware
+
+# Runs the #[ignore]d tests that need a real render runtime. Each job first
+# proves its runtime is present with `bpp doctor`, so a missing GPU or Blender
+# fails the job instead of silently skipping the tests.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: Machine for the wgpu tests
+        type: choice
+        default: ubuntu-lavapipe
+        options:
+          - ubuntu-lavapipe
+          - self-hosted-macos
+      blenderproc:
+        description: Also run the real BlenderProc tests
+        type: boolean
+        default: true
+  schedule:
+    - cron: "0 4 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  wgpu:
+    name: Real wgpu (${{ inputs.runner || 'ubuntu-lavapipe' }})
+    runs-on: ${{ inputs.runner == 'self-hosted-macos' && fromJSON('["self-hosted","macOS","ARM64"]') || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the lavapipe software Vulkan driver
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1 vulkan-tools
+          vulkaninfo --summary
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: hardware-wgpu
+      - name: Require a wgpu adapter
+        run: cargo run --locked -p bpp-cli -- doctor --renderer wgpu
+      - run: cargo test --locked -p bpp-render-wgpu -- --ignored
+      - run: cargo test --locked -p bpp-cli --bin bpp -- --ignored real_wgpu_generate_cli
+
+  blenderproc:
+    name: Real BlenderProc
+    if: github.event_name == 'schedule' || inputs.blenderproc
+    runs-on: ubuntu-latest
+    env:
+      BPP_BLENDERPROC_EXECUTABLE: ${{ github.workspace }}/tools/blenderproc-worker/.venv/bin/blenderproc
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Blender's system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libsm6 libxfixes3 libxi6 libxkbcommon0 libxrender1 libxxf86vm1
+      - uses: astral-sh/setup-uv@v6
+      - name: Install the pinned BlenderProc environment
+        working-directory: tools/blenderproc-worker
+        run: uv sync --locked --python 3.11
+      # BlenderProc downloads Blender itself on first run.
+      - uses: actions/cache@v4
+        with:
+          path: ~/blender
+          key: blender-${{ runner.os }}-${{ hashFiles('tools/blenderproc-worker/uv.lock') }}
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: hardware-blenderproc
+      - name: Require a working BlenderProc runtime
+        run: cargo run --locked -p bpp-cli --features blenderproc -- doctor --renderer blenderproc
+      - run: cargo test --locked -p bpp-render-blenderproc --test worker_supervision -- --ignored real_worker
+
+  cross-backend:
+    name: Cross-backend geometry (Metal + BlenderProc)
+    if: inputs.runner == 'self-hosted-macos' && inputs.blenderproc
+    runs-on: [self-hosted, macOS, ARM64]
+    env:
+      BPP_BLENDERPROC_EXECUTABLE: ${{ github.workspace }}/tools/blenderproc-worker/.venv/bin/blenderproc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - working-directory: tools/blenderproc-worker
+        run: uv sync --locked --python 3.11
+      - run: rustup toolchain install
+      - name: Require both runtimes
+        run: |
+          cargo run --locked -p bpp-cli -- doctor --renderer wgpu
+          cargo run --locked -p bpp-cli --features blenderproc -- doctor --renderer blenderproc
+      - run: cargo test --locked -p bpp-render-blenderproc --test cross_backend_geometry -- --ignored

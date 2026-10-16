@@ -1,0 +1,148 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins the channel and components.
+      - run: rustup toolchain install
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: Clippy (${{ matrix.os }}, ${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        name: [fast, reproducible]
+        include:
+          - name: fast
+            args: --workspace --all-targets --features bpp-cli/blenderproc
+          - name: reproducible
+            args: -p bpp-cli -p bpp-pipeline -p bpp-physics-rapier --all-targets --no-default-features --features bpp-cli/reproducible,bpp-cli/wgpu,bpp-cli/blenderproc,bpp-pipeline/reproducible,bpp-physics-rapier/reproducible
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy-${{ matrix.name }}
+      - run: cargo clippy --locked ${{ matrix.args }} -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }}, ${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        name: [fast, reproducible]
+        include:
+          - name: fast
+            args: --workspace
+          - name: reproducible
+            args: -p bpp-cli -p bpp-pipeline -p bpp-physics-rapier --no-default-features --features bpp-cli/reproducible,bpp-cli/wgpu,bpp-cli/blenderproc,bpp-pipeline/reproducible,bpp-physics-rapier/reproducible
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-${{ matrix.name }}
+      # Hardware tests are #[ignore]d here and run in the Hardware workflow.
+      - run: cargo test --locked ${{ matrix.args }}
+
+  docs:
+    name: Rustdoc
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --workspace --no-deps --locked
+
+  schema:
+    name: Config schema drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run --locked -p xtask -- schema --check
+
+  deny:
+    name: Dependency policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install && rustup component add llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
+      - run: |
+          {
+            echo '### Line coverage'
+            echo '```'
+            cargo llvm-cov report --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lcov
+          path: lcov.info
+
+  worker:
+    name: BlenderProc worker (Python)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/blenderproc-worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv lock --check
+      - run: uvx ruff@0.12.0 check .
+      - run: uv run --no-project --python 3.11 python -m py_compile blenderproc_worker.py
+
+  ci-ok:
+    name: CI passed
+    if: always()
+    needs: [fmt, clippy, test, docs, schema, deny, coverage, worker]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every job to succeed
+        run: |
+          echo '${{ toJSON(needs) }}' | jq -e 'all(.[]; .result == "success")'
