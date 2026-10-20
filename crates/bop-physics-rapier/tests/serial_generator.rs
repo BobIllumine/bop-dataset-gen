@@ -304,16 +304,26 @@ fn eight_scene_primitive_corpus_is_locked_serializable_and_schedule_independent(
     let bytes = serde_json::to_vec(&serial).expect("corpus serializes canonically");
     let digest = blake3::hash(&bytes).to_hex().to_string();
 
-    #[cfg(feature = "fast")]
-    assert_eq!(
-        digest,
-        "de77cc5af0d60511c8b712b7736120d13687d0c9c934bae9378c9dddb54e630b"
+    // Physics output is byte-identical per platform, not across platforms
+    // (see docs/book/determinism.md), so each CI platform has its own lock.
+    let platform = format!(
+        "{}-{}-{}",
+        std::env::consts::ARCH,
+        std::env::consts::OS,
+        if cfg!(feature = "reproducible") {
+            "reproducible"
+        } else {
+            "fast"
+        },
     );
-    #[cfg(feature = "reproducible")]
-    assert_eq!(
-        digest,
-        "db281b77f46d9bb8e2806cf67e865547419dc964d6ecc0e299a8a793849197d5"
-    );
+    let expected = match platform.as_str() {
+        "aarch64-macos-fast" => "de77cc5af0d60511c8b712b7736120d13687d0c9c934bae9378c9dddb54e630b",
+        "aarch64-macos-reproducible" => {
+            "db281b77f46d9bb8e2806cf67e865547419dc964d6ecc0e299a8a793849197d5"
+        }
+        _ => panic!("no corpus digest is pinned for {platform}; this platform produced {digest}"),
+    };
+    assert_eq!(digest, expected, "corpus digest for {platform}");
 }
 
 fn assert_scene_round_trip(expected: &bop_core::SceneSnapshot, decoded: &bop_core::SceneSnapshot) {

@@ -68,7 +68,8 @@ jobs:
         with:
           key: test-${{ matrix.name }}
       # Hardware tests are #[ignore]d here and run in the Hardware workflow.
-      - run: cargo test --locked ${{ matrix.args }}
+      # --no-fail-fast reports every failing test binary, not just the first.
+      - run: cargo test --locked --no-fail-fast ${{ matrix.args }}
 
   docs:
     name: Rustdoc

@@ -224,14 +224,14 @@ fn a_slow_consumer_bounds_in_flight_snapshots() {
 
         // Drain before asserting: a failed assertion inside the scope would
         // otherwise wait forever for workers blocked in `send`.
-        let received = receiver.iter().count();
+        let delivered = receiver.iter().count();
         let accepted = physics.join().unwrap().unwrap().accepted_scene_count();
         assert!(
             simulated <= capacity + workers,
             "{simulated} scenes simulated with nobody consuming"
         );
         assert_eq!(queued, capacity);
-        assert_eq!(received, 40);
+        assert_eq!(delivered, 40);
         assert_eq!(accepted, 40);
     });
 }

@@ -219,6 +219,13 @@ fn places_two_objects_with_the_locked_public_pose_vector() {
         .expect("catalog compiles")
         .place(&population, PLACEMENT_SEED)
         .expect("placement succeeds");
+    // glam's aarch64 (NEON) and x86_64 (SSE2) paths round one component
+    // differently; poses are reproducible per platform (see determinism.md).
+    let rotation_y = if cfg!(target_arch = "aarch64") {
+        1_056_521_893
+    } else {
+        1_056_521_894
+    };
 
     assert_eq!(
         summary(&placement),
@@ -228,7 +235,7 @@ fn places_two_objects_with_the_locked_public_pose_vector() {
                 "cube".to_owned(),
                 [1_065_353_216, 1_056_964_608, 1_036_831_949],
                 [3_195_204_706, 3_196_072_263, 1_045_427_082],
-                [1_058_688_376, 1_056_521_893, 3_183_034_872, 1_059_073_983],
+                [1_058_688_376, rotation_y, 3_183_034_872, 1_059_073_983],
             ),
             (
                 2,
