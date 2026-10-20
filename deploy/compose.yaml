@@ -18,7 +18,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    # Set to a published image (e.g. <user>/bop-server:0.1.1) to pull instead of build.
+    # Set to a published image (e.g. ghcr.io/bobillumine/bop-server:0.1.1) to pull instead of build.
     image: ${BOP_SERVER_IMAGE:-bop-server:latest}
     restart: unless-stopped
     ports:

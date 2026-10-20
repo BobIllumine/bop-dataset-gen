@@ -38,19 +38,23 @@ On the deploy machine:
 Note the machine's Funnel name, `https://<machine>.<tailnet>.ts.net`. It is
 the studio's address below.
 
-## 2. Get the code
+## 2. Get the deployment files
 
-Both repositories, side by side, at the release:
+Released images are published to GitHub Packages, so the machine only needs
+this repository's `deploy/` directory at the release:
 
 ```text
-git clone https://github.com/BobIllumine/bop-dataset-gen.git
-git clone https://github.com/BobIllumine/bop-studio.git
-cd bop-dataset-gen && git checkout v0.1.1 && cd ..
-cd bop-studio && git checkout v0.1.1 && cd ..
+git clone --branch v0.1.1 https://github.com/BobIllumine/bop-dataset-gen.git
 ```
 
-Compose builds the studio from `../bop-studio`; set `BOP_STUDIO_CONTEXT` in
-`.env` if it lives elsewhere.
+| Image | |
+| --- | --- |
+| `ghcr.io/bobillumine/bop-server:0.1.1` | linux/amd64, NVIDIA |
+| `ghcr.io/bobillumine/bop-studio:0.1.1` | linux/amd64 and linux/arm64 |
+
+To build from source instead, also clone bop-studio next to it
+(`git clone --branch v0.1.1 https://github.com/BobIllumine/bop-studio.git`),
+leave the two `*_IMAGE` variables below unset, and add `--build` in step 6.
 
 ## 3. authentik
 
@@ -129,6 +133,10 @@ BOP_OIDC_GROUPS=bop-users
 
 # Leave unset unless scripts need it; if set, use `openssl rand -hex 32`.
 #BOP_API_TOKEN=
+
+# The released images.
+BOP_SERVER_IMAGE=ghcr.io/bobillumine/bop-server:0.1.1
+BOP_STUDIO_IMAGE=ghcr.io/bobillumine/bop-studio:0.1.1
 ```
 
 Leave `BOP_ALLOW_ANONYMOUS`, `BOP_CORS_ORIGINS` and the `*_BIND` variables
@@ -142,13 +150,13 @@ default, which covers authentik. To pin it, set
 
 ```text
 cd bop-dataset-gen
-docker compose -f deploy/compose.yaml --profile studio up -d --build
+docker compose -f deploy/compose.yaml --profile studio pull
+docker compose -f deploy/compose.yaml --profile studio up -d
 ```
 
-The first build compiles the server and installs BlenderProc and Blender
-(expect 20 minutes or more). To pull a published server image instead, set
-`BOP_SERVER_IMAGE=<user>/bop-server:0.1.1` in `.env` and drop `--build` for
-it (`docker compose ... pull bop-server`).
+The server image is large (it includes BlenderProc and Blender), so the first
+pull takes a while. Building from source with `up -d --build` instead takes
+20 minutes or more.
 
 Check it:
 
@@ -187,8 +195,9 @@ server*.
 
 ## Operating it
 
-- **Upgrading:** check out the new tag in both repositories, then
-  `docker compose -f deploy/compose.yaml --profile studio up -d --build`.
+- **Upgrading:** check out the new tag, set both `*_IMAGE` variables to the
+  new version, then `docker compose -f deploy/compose.yaml --profile studio pull`
+  and `up -d`.
   Stopping lets in-flight scenes commit (up to the 5-minute grace period), and
   the interrupted job continues on the next start.
 - **Backups:** PostgreSQL and the bucket hold everything that matters. The

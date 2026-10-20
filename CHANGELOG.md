@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **GitHub Packages.** The server image is also published as
+  `ghcr.io/bobillumine/bop-server`, and Docker Hub is optional. A manual run
+  with a `tag` publishes an existing release again.
+
 ## 0.1.1
 
 ### Changed
