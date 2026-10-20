@@ -1,0 +1,9 @@
+target/
+out/
+superpowers/
+.git/
+.worktrees/
+.idea/
+**/.venv/
+**/__pycache__/
+codex-session-*.md

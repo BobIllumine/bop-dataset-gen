@@ -1,0 +1,142 @@
+solid hex_prism
+  facet normal 0 0 1
+    outer loop
+      vertex 18 0 7
+      vertex 9 15.588457 7
+      vertex -9 15.588457 7
+    endloop
+  endfacet
+  facet normal 0 0 -1
+    outer loop
+      vertex 18 0 -7
+      vertex -9 15.588457 -7
+      vertex 9 15.588457 -7
+    endloop
+  endfacet
+  facet normal 0 0 1
+    outer loop
+      vertex 18 0 7
+      vertex -9 15.588457 7
+      vertex -18 0 7
+    endloop
+  endfacet
+  facet normal 0 0 -1
+    outer loop
+      vertex 18 0 -7
+      vertex -18 0 -7
+      vertex -9 15.588457 -7
+    endloop
+  endfacet
+  facet normal 0 0 1
+    outer loop
+      vertex 18 0 7
+      vertex -18 0 7
+      vertex -9 -15.588457 7
+    endloop
+  endfacet
+  facet normal 0 0 -1
+    outer loop
+      vertex 18 0 -7
+      vertex -9 -15.588457 -7
+      vertex -18 0 -7
+    endloop
+  endfacet
+  facet normal 0 0 1
+    outer loop
+      vertex 18 0 7
+      vertex -9 -15.588457 7
+      vertex 9 -15.588457 7
+    endloop
+  endfacet
+  facet normal 0 0 -1
+    outer loop
+      vertex 18 0 -7
+      vertex 9 -15.588457 -7
+      vertex -9 -15.588457 -7
+    endloop
+  endfacet
+  facet normal 0.866025 0.5 0
+    outer loop
+      vertex 18 0 -7
+      vertex 9 15.588457 -7
+      vertex 9 15.588457 7
+    endloop
+  endfacet
+  facet normal 0.866025 0.5 0
+    outer loop
+      vertex 18 0 -7
+      vertex 9 15.588457 7
+      vertex 18 0 7
+    endloop
+  endfacet
+  facet normal 0 1 0
+    outer loop
+      vertex 9 15.588457 -7
+      vertex -9 15.588457 -7
+      vertex -9 15.588457 7
+    endloop
+  endfacet
+  facet normal 0 1 0
+    outer loop
+      vertex 9 15.588457 -7
+      vertex -9 15.588457 7
+      vertex 9 15.588457 7
+    endloop
+  endfacet
+  facet normal -0.866025 0.5 0
+    outer loop
+      vertex -9 15.588457 -7
+      vertex -18 0 -7
+      vertex -18 0 7
+    endloop
+  endfacet
+  facet normal -0.866025 0.5 0
+    outer loop
+      vertex -9 15.588457 -7
+      vertex -18 0 7
+      vertex -9 15.588457 7
+    endloop
+  endfacet
+  facet normal -0.866025 -0.5 0
+    outer loop
+      vertex -18 0 -7
+      vertex -9 -15.588457 -7
+      vertex -9 -15.588457 7
+    endloop
+  endfacet
+  facet normal -0.866025 -0.5 0
+    outer loop
+      vertex -18 0 -7
+      vertex -9 -15.588457 7
+      vertex -18 0 7
+    endloop
+  endfacet
+  facet normal 0 -1 0
+    outer loop
+      vertex -9 -15.588457 -7
+      vertex 9 -15.588457 -7
+      vertex 9 -15.588457 7
+    endloop
+  endfacet
+  facet normal 0 -1 0
+    outer loop
+      vertex -9 -15.588457 -7
+      vertex 9 -15.588457 7
+      vertex -9 -15.588457 7
+    endloop
+  endfacet
+  facet normal 0.866025 -0.5 0
+    outer loop
+      vertex 9 -15.588457 -7
+      vertex 18 0 -7
+      vertex 18 0 7
+    endloop
+  endfacet
+  facet normal 0.866025 -0.5 0
+    outer loop
+      vertex 9 -15.588457 -7
+      vertex 18 0 7
+      vertex 9 -15.588457 7
+    endloop
+  endfacet
+endsolid hex_prism

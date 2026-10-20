@@ -1,7 +1,7 @@
 name: Release
 
 # Push a tag like v0.1.0 (matching the workspace version) to build and publish
-# the `bpp` binaries. Tags with a suffix, such as v0.2.0-rc.1, publish a
+# the `bop-gen` binaries. Tags with a suffix, such as v0.2.0-rc.1, publish a
 # prerelease.
 
 on:
@@ -23,7 +23,7 @@ jobs:
       - run: rustup toolchain install
       - run: |
           version=$(cargo metadata --no-deps --format-version 1 --locked \
-            | jq -r '.packages[] | select(.name == "bpp-cli") | .version')
+            | jq -r '.packages[] | select(.name == "bop-cli") | .version')
           if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
             echo "::error::tag ${GITHUB_REF_NAME} does not match workspace version ${version}"
             exit 1
@@ -55,15 +55,15 @@ jobs:
         with:
           key: release-${{ matrix.target }}-${{ matrix.variant }}
       - run: >
-          cargo build --release --locked -p bpp-cli
+          cargo build --release --locked -p bop-cli
           --target ${{ matrix.target }}
           --no-default-features --features ${{ matrix.variant }},wgpu,blenderproc
       - name: Package
         run: |
-          name="bpp-${GITHUB_REF_NAME}-${{ matrix.variant }}-${{ matrix.target }}"
+          name="bop-gen-${GITHUB_REF_NAME}-${{ matrix.variant }}-${{ matrix.target }}"
           stage="dist/${name}"
           mkdir -p "${stage}/schemas" "${stage}/blenderproc-worker"
-          cp "target/${{ matrix.target }}/release/bpp" "${stage}/"
+          cp "target/${{ matrix.target }}/release/bop-gen" "${stage}/"
           cp LICENSE README.md "${stage}/"
           cp schemas/run-config.schema.json "${stage}/schemas/"
           cp tools/blenderproc-worker/blenderproc_worker.py \
@@ -73,7 +73,7 @@ jobs:
           (cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
       - uses: actions/upload-artifact@v4
         with:
-          name: bpp-${{ matrix.variant }}-${{ matrix.target }}
+          name: bop-gen-${{ matrix.variant }}-${{ matrix.target }}
           path: |
             dist/*.tar.gz
             dist/*.sha256
@@ -96,4 +96,4 @@ jobs:
           prerelease=""
           case "${GITHUB_REF_NAME}" in *-*) prerelease="--prerelease" ;; esac
           gh release create "${GITHUB_REF_NAME}" dist/* \
-            --verify-tag --generate-notes --title "bpp ${GITHUB_REF_NAME}" ${prerelease}
+            --verify-tag --generate-notes --title "bop-gen ${GITHUB_REF_NAME}" ${prerelease}

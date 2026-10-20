@@ -10,4 +10,4 @@ publish = false
 workspace = true
 
 [dependencies]
-bpp-core = { path = "../crates/bpp-core", features = ["schema"] }
+bop-core = { path = "../crates/bop-core", features = ["schema"] }

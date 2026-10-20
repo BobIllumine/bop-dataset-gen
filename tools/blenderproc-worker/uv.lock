@@ -4,7 +4,7 @@ requires-python = "==3.11.*"
 
 [[package]]
 name = "blenderproc"
-version = "2.7.0"
+version = "2.8.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "h5py" },
@@ -16,13 +16,13 @@ dependencies = [
     { name = "requests" },
     { name = "setuptools" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/19/9e/aea19d48ebabf66216b28b46fc1c3b32ea4ee1b83de7b01464e40c8b99c2/blenderproc-2.7.0.tar.gz", hash = "sha256:f36787360cd6bef0a373d14968ef1bbed5a3adab841178104e11c69b88ebb715", size = 303415, upload-time = "2024-01-26T16:26:46.674Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ba/9a/275c77f11972995270e4b6f0ff8677abe9206f53b4b34c0f4221ec7d99ac/blenderproc-2.8.0.tar.gz", hash = "sha256:7dda43c5a347b37d9a42a2905e54fb3fdf1838010364327319726d9c99a73417", size = 307758, upload-time = "2024-10-22T13:42:28.916Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3b/89/01b44d8533186e3598b4a14dd64718a20848332e7fcf1633b50e527b92a2/blenderproc-2.7.0-py3-none-any.whl", hash = "sha256:b5ba059f80d431c0baa842c5a3c49ce487801c742074da0ad9c3b9299cce411f", size = 365869, upload-time = "2024-01-26T16:26:44.626Z" },
+    { url = "https://files.pythonhosted.org/packages/22/9b/0082864e0f60af4660ff27e61e82bec898c3837179ae623aff5dc693dfcf/blenderproc-2.8.0-py3-none-any.whl", hash = "sha256:fe17744bed3e5e76201b18da7b8827c7fc8228c25e77deaa055acac73bef3584", size = 371526, upload-time = "2024-10-22T13:42:27.068Z" },
 ]
 
 [[package]]
-name = "bpp-blenderproc-worker"
+name = "bop-blenderproc-worker"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
@@ -32,7 +32,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "blenderproc", specifier = "==2.7.0" },
+    { name = "blenderproc", specifier = "==2.8.0" },
     { name = "numpy", specifier = ">=1.24,<3" },
 ]
 

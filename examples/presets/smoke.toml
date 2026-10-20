@@ -1,0 +1,85 @@
+# Benchmark preset "smoke": 8 scenes, 10 objects, 1 camera(s) at 256x256.
+# Smallest end-to-end run; also the quickstart configuration.
+# Relative paths resolve against this file's directory.
+
+[run]
+master_seed = 1
+valid_scene_count = 8
+scene_attempt_limit = 8
+placement_attempt_limit_per_object = 64
+simulation_workers = 8
+renderer_workers = 4
+queue_capacity = 32
+output_path = "output"
+cache_path = "../../target/bop-cache"
+
+[bin]
+inner_dimensions_m = [0.6, 0.4, 0.5]
+floor_thickness_m = 0.02
+wall_thickness_m = 0.02
+world_from_bin = { translation = [0.0, 0.0, 0.0], rotation_xyzw = [0.0, 0.0, 0.0, 1.0] }
+material_label = "steel"
+physical_properties = { friction = 0.5, restitution = 0.1 }
+
+[[assets]]
+id = "cube"
+source_path = "../assets/cube.stl"
+source_unit_scale_m = 0.001
+model_transform = { translation = [0.0, 0.0, 0.0], rotation_xyzw = [0.0, 0.0, 0.0, 1.0] }
+mixture_weight = 1.0
+physical_properties = { mass_kg = { kind = "fixed", value = 0.06 }, friction = { kind = "uniform", min = 0.4, max = 0.7 }, restitution = { kind = "fixed", value = 0.1 } }
+vhacd = { resolution = 20000, max_convex_hulls = 1, concavity = 0.0025, plane_downsampling = 4, convex_hull_downsampling = 4 }
+
+[population]
+object_count = { kind = "fixed", value = 10 }
+asset_mixture = { kind = "fixed", value = "cube" }
+spawn_volume = { min_m = [-0.26, -0.16, 0.05], max_m = [0.26, 0.16, 0.48] }
+
+[physics]
+fixed_timestep_s = 0.004166667
+substeps = 2
+solver_iterations = 8
+min_steps = 32
+max_steps = 2400
+stability_check_interval = 8
+linear_sleep_threshold_mps = 0.02
+angular_sleep_threshold_rad_s = 0.05
+required_stable_checks = 3
+escape_margin_m = 0.002
+maximum_penetration_m = 0.01
+
+[[cameras]]
+id = 1
+image_size = { width = 256, height = 256 }
+near_m = 0.05
+far_m = 3.0
+projection = { vertical_fov_deg = 50.0 }
+pose = { fixed_world_from_camera = { translation = [0.0, 0.0, 1.0], rotation_xyzw = [-0.70710678, 0.0, 0.0, 0.70710678] } }
+
+[appearance]
+background_srgb = [0.05, 0.05, 0.06, 1.0]
+ambient = { color = [1.0, 1.0, 1.0], intensity = 0.2 }
+directional_lights = [
+  { direction_world = [0.3, 0.2, -1.0], color = [1.0, 0.97, 0.92], illuminance_lux = 1000.0 },
+]
+point_lights = []
+material_defaults = { base_color_srgb = [0.7, 0.7, 0.72, 1.0], metallic = { kind = "uniform", min = 0.0, max = 0.6 }, roughness = { kind = "uniform", min = 0.3, max = 0.8 } }
+
+[renderers.wgpu]
+device_preference = "automatic"
+adapter_preference = "high_performance"
+shadow_map_size = 2048
+rgb_fxaa = true
+
+[renderers.blenderproc]
+executable_path = "blenderproc"
+worker_path = "../../tools/blenderproc-worker/blenderproc_worker.py"
+device_selection = "GPU"
+handshake_timeout_s = 120.0
+request_timeout_s = 600.0
+stderr_tail_capacity = 256
+
+[output]
+rgb = true
+depth = true
+visible_instances = true

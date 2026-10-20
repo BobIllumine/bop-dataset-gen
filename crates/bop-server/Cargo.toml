@@ -1,0 +1,46 @@
+[package]
+name = "bop-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["fast", "wgpu"]
+fast = ["bop-run/fast", "bop-pipeline/fast"]
+reproducible = ["bop-run/reproducible", "bop-pipeline/reproducible"]
+wgpu = ["bop-run/wgpu"]
+blenderproc = ["bop-run/blenderproc"]
+
+[lints]
+workspace = true
+
+[dependencies]
+axum = "0.8.9"
+bop-core = { path = "../bop-core" }
+bop-dataset = { path = "../bop-dataset" }
+bop-pipeline = { path = "../bop-pipeline", default-features = false }
+bop-run = { path = "../bop-run", default-features = false }
+futures = "0.3"
+jsonwebtoken = { version = "11.1.0", default-features = false, features = ["aws_lc_rs"] }
+object_store = { version = "0.14.2", features = ["aws"] }
+reqwest = { version = "0.13", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.9.0", default-features = false, features = ["any", "migrate", "runtime-tokio", "sqlite-bundled", "postgres", "tls-rustls-ring-webpki"] }
+tar = { version = "0.4.46", default-features = false }
+thiserror = "2"
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "signal", "sync", "fs", "net"] }
+toml = "1.1.4"
+tower-http = { version = "0.6.11", features = ["cors", "set-header"] }
+tracing = "=0.1.41"
+tracing-subscriber = { version = "=0.3.20", default-features = false, features = ["env-filter", "fmt", "json", "std"] }
+utoipa = "6.0.0"
+utoipa-axum = "0.3.0"
+uuid = { version = "1.24", features = ["v4"] }
+
+[dev-dependencies]
+jsonwebtoken = { version = "11.1.0", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }

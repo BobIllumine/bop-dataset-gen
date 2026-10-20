@@ -1,0 +1,89 @@
+# authentik in containers, preconfigured for bop studio. Layer it over compose.yaml:
+#
+#   docker compose -f deploy/compose.yaml -f deploy/authentik.yaml --profile local --profile studio up -d
+#
+# Required in deploy/.env (see .env.example): AUTHENTIK_SECRET_KEY,
+# AUTHENTIK_PG_PASS, AUTHENTIK_BOOTSTRAP_PASSWORD and AUTHENTIK_BOOTSTRAP_EMAIL.
+# Sign in as `akadmin` with the bootstrap password; add other users to the
+# `bop-users` group in the authentik admin interface.
+#
+# For an authentik you already run, skip this file and set BOP_OIDC_* in deploy/.env.
+
+x-authentik: &authentik
+  image: ghcr.io/goauthentik/server:${AUTHENTIK_TAG:-2026.8.4}
+  restart: unless-stopped
+  shm_size: 512mb
+  depends_on:
+    authentik-postgres:
+      condition: service_healthy
+  environment: &authentik-env
+    AUTHENTIK_POSTGRESQL__HOST: authentik-postgres
+    AUTHENTIK_POSTGRESQL__NAME: authentik
+    AUTHENTIK_POSTGRESQL__USER: authentik
+    AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_PG_PASS:?set AUTHENTIK_PG_PASS in deploy/.env}
+    AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?set AUTHENTIK_SECRET_KEY in deploy/.env (openssl rand -base64 60)}
+    AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
+    AUTHENTIK_DISABLE_UPDATE_CHECK: "true"
+    # Read by blueprints/bop.yaml.
+    BOP_STUDIO_URL: ${BOP_STUDIO_URL:-http://localhost:3000}
+    BOP_OIDC_CLIENT_ID: ${BOP_OIDC_CLIENT_ID:-bop-studio}
+    BOP_OIDC_GROUP: ${BOP_OIDC_GROUP:-bop-users}
+  volumes:
+    - authentik-data:/data
+    - ./authentik/blueprints:/blueprints/bop:ro
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  bop-server:
+    environment:
+      # The issuer is the address browsers use; the server fetches keys over
+      # the compose network instead.
+      BOP_OIDC_ISSUER: ${AUTHENTIK_URL:-http://localhost:9000}/application/o/bop/
+      BOP_OIDC_CLIENT_ID: ${BOP_OIDC_CLIENT_ID:-bop-studio}
+      BOP_OIDC_JWKS_URL: http://authentik-server:9000/application/o/bop/jwks/
+      BOP_OIDC_GROUPS: ${BOP_OIDC_GROUP:-bop-users}
+    depends_on:
+      authentik-server:
+        condition: service_started
+
+  authentik-server:
+    <<: *authentik
+    command: server
+    environment:
+      <<: *authentik-env
+      # Creates `akadmin` with this password on first start, so the
+      # initial-setup page is never open to whoever reaches it first.
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:?set AUTHENTIK_BOOTSTRAP_PASSWORD in deploy/.env}
+      AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL:?set AUTHENTIK_BOOTSTRAP_EMAIL in deploy/.env}
+    ports:
+      - "${AUTHENTIK_BIND:-127.0.0.1}:${AUTHENTIK_PORT:-9000}:9000"
+
+  # Unlike authentik's reference compose file, the worker gets no Docker
+  # socket: it would hand the host to anyone who compromises authentik. The
+  # embedded outpost needs none.
+  authentik-worker:
+    <<: *authentik
+    command: worker
+    environment:
+      <<: *authentik-env
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD}
+      AUTHENTIK_BOOTSTRAP_EMAIL: ${AUTHENTIK_BOOTSTRAP_EMAIL}
+
+  authentik-postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: authentik
+      POSTGRES_DB: authentik
+      POSTGRES_PASSWORD: ${AUTHENTIK_PG_PASS:?set AUTHENTIK_PG_PASS in deploy/.env}
+    volumes:
+      - authentik-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U authentik -d authentik"]
+      interval: 5s
+      retries: 20
+
+volumes:
+  authentik-data:
+  authentik-postgres-data:

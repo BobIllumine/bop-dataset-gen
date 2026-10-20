@@ -5,51 +5,51 @@
 One scene moves through the system like this:
 
 ```text
-run.toml ──► RunConfig ──► RunPlan                         (bpp-core)
+run.toml ──► RunConfig ──► RunPlan                         (bop-core)
                               │
-asset files ──► prepared catalog (meshes, materials,       (bpp-assets)
+asset files ──► prepared catalog (meshes, materials,       (bop-assets)
                 convex hulls; cached on disk)
                               │
 SceneId ──► seeds ──► population ──► placement ──► Rapier settle
-                              │                            (bpp-physics-rapier)
+                              │                            (bop-physics-rapier)
                               ▼
                        SceneSnapshot   ◄── immutable, renderer-neutral
                               │
-             RenderRequestPlanner: + cameras, lights       (bpp-pipeline)
+             RenderRequestPlanner: + cameras, lights       (bop-pipeline)
                               │
               ┌───────────────┴───────────────┐
          wgpu renderer                 BlenderProc renderer
-         (bpp-render-wgpu)             (bpp-render-blenderproc)
+         (bop-render-wgpu)             (bop-render-blenderproc)
               └───────────────┬───────────────┘
                               ▼
-        .staging/<scene> ──► validate ──► atomic rename     (bpp-dataset)
+        .staging/<scene> ──► validate ──► atomic rename     (bop-dataset)
                               │
                         scenes/<scene id>/
 ```
 
 Physics and rendering never talk to each other directly. Physics produces a
 `SceneSnapshot`; renderers only read snapshots. That boundary is what lets the
-CLI split a run in two: `bpp simulate` writes snapshots to a *corpus* on disk,
-and `bpp render` renders a corpus later, with either backend, without running
+CLI split a run in two: `bop-gen simulate` writes snapshots to a *corpus* on disk,
+and `bop-gen render` renders a corpus later, with either backend, without running
 physics again.
 
 ## Crates
 
 | Crate | Owns |
 |---|---|
-| `bpp-core` | Identifiers, seed derivation, transforms, cameras, scene snapshots, render requests and reports, `RenderError`, and the validated run configuration. |
-| `bpp-assets` | STL/GLB loading, unit and axis normalization, materials, convex decomposition, and the content-addressed cache. |
-| `bpp-physics-rapier` | Population and placement planning, the Rapier world, settling, and rejection. |
-| `bpp-render-api` | The `Renderer` trait every backend implements. |
-| `bpp-render-wgpu` | The in-process GPU renderer. |
-| `bpp-render-blenderproc` | Supervision of the persistent BlenderProc worker process. |
-| `bpp-dataset` | On-disk formats: staging, atomic commit, group commit, resume, validation, and snapshot corpora. |
-| `bpp-pipeline` | Composition of the stages, serially and in parallel. |
-| `bpp-cli` | The `bpp` binary: argument parsing, exit codes, logging, and choosing a renderer. |
+| `bop-core` | Identifiers, seed derivation, transforms, cameras, scene snapshots, render requests and reports, `RenderError`, and the validated run configuration. |
+| `bop-assets` | STL/GLB loading, unit and axis normalization, materials, convex decomposition, and the content-addressed cache. |
+| `bop-physics-rapier` | Population and placement planning, the Rapier world, settling, and rejection. |
+| `bop-render-api` | The `Renderer` trait every backend implements. |
+| `bop-render-wgpu` | The in-process GPU renderer. |
+| `bop-render-blenderproc` | Supervision of the persistent BlenderProc worker process. |
+| `bop-dataset` | On-disk formats: staging, atomic commit, group commit, resume, validation, and snapshot corpora. |
+| `bop-pipeline` | Composition of the stages, serially and in parallel. |
+| `bop-cli` | The `bop-gen` binary: argument parsing, exit codes, logging, and choosing a renderer. |
 
-Dependencies point downward. `bpp-core` depends on no other workspace crate.
-`bpp-pipeline` is generic over any `Renderer` and does not depend on either
-backend; only `bpp-cli` names the concrete renderers.
+Dependencies point downward. `bop-core` depends on no other workspace crate.
+`bop-pipeline` is generic over any `Renderer` and does not depend on either
+backend; only `bop-cli` names the concrete renderers.
 
 ## Serial and parallel pipelines
 

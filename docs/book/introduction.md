@@ -1,6 +1,6 @@
 # Introduction
 
-`bpp-dataset-gen` generates synthetic training data for robotic bin picking.
+`bop-dataset-gen` generates synthetic training data for robotic bin picking.
 It drops 3D objects into a virtual bin, lets Rapier settle them, renders every
 settled scene from one or more cameras, and saves RGB, metric depth, visible
 instance masks, and exact object poses.
@@ -26,7 +26,7 @@ a small asset and configuration, generates a dataset, validates it, then
 corrupts one file and checks that validation catches it:
 
 ```text
-cargo test -p bpp-cli --bin bpp -- --ignored real_wgpu_generate_cli
+cargo test -p bop-cli --bin bop-gen -- --ignored real_wgpu_generate_cli
 ```
 
 ## Where to read next

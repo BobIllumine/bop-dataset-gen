@@ -1,0 +1,62 @@
+# Signs the studio in through authentik: a public OAuth2/OIDC client using the
+# authorization code flow with PKCE, an application only members of the
+# `bop-users` group may open, and that group with the bootstrap admin in it.
+#
+# Applied by the authentik worker on start and whenever this file changes.
+# The values come from the worker's environment (see deploy/authentik.yaml).
+version: 1
+metadata:
+  name: bop studio
+  labels:
+    blueprints.goauthentik.io/description: OAuth2 provider, application and group for bop studio
+entries:
+  - model: authentik_core.group
+    id: users
+    identifiers:
+      name: !Env [BOP_OIDC_GROUP, bop-users]
+    attrs:
+      users:
+        - !Find [authentik_core.user, [username, akadmin]]
+
+  - model: authentik_providers_oauth2.oauth2provider
+    id: provider
+    identifiers:
+      name: bop studio
+    attrs:
+      client_type: public
+      client_id: !Env [BOP_OIDC_CLIENT_ID, bop-studio]
+      grant_types: [authorization_code, refresh_token]
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      # Without a signing key authentik signs with the client secret (HS256),
+      # which bop-server refuses.
+      signing_key: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
+      redirect_uris:
+        - matching_mode: strict
+          url: !Format ["%s/auth/callback", !Env [BOP_STUDIO_URL, "http://localhost:3000"]]
+      access_token_validity: minutes=10
+      refresh_token_validity: days=7
+      sub_mode: hashed_user_id
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-profile]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-offline_access]]
+
+  - model: authentik_core.application
+    id: application
+    identifiers:
+      slug: bop
+    attrs:
+      name: bop studio
+      provider: !KeyOf provider
+      meta_launch_url: !Env [BOP_STUDIO_URL, "http://localhost:3000"]
+      policy_engine_mode: any
+
+  # With a binding, only users it matches may sign in to the application.
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf application
+      group: !KeyOf users
+    attrs:
+      order: 0

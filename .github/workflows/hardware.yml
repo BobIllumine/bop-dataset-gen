@@ -1,7 +1,7 @@
 name: Hardware
 
 # Runs the #[ignore]d tests that need a real render runtime. Each job first
-# proves its runtime is present with `bpp doctor`, so a missing GPU or Blender
+# proves its runtime is present with `bop-gen doctor`, so a missing GPU or Blender
 # fails the job instead of silently skipping the tests.
 
 on:
@@ -44,16 +44,17 @@ jobs:
         with:
           key: hardware-wgpu
       - name: Require a wgpu adapter
-        run: cargo run --locked -p bpp-cli -- doctor --renderer wgpu
-      - run: cargo test --locked -p bpp-render-wgpu -- --ignored
-      - run: cargo test --locked -p bpp-cli --bin bpp -- --ignored real_wgpu_generate_cli
+        run: cargo run --locked -p bop-cli -- doctor --renderer wgpu
+      - run: cargo test --locked -p bop-render-wgpu -- --ignored
+      - run: cargo test --locked -p bop-cli --bin bop-gen -- --ignored real_wgpu_generate_cli
+      - run: cargo test --locked -p bop-cli --test exit_codes -- --ignored real_wgpu_bench
 
   blenderproc:
     name: Real BlenderProc
     if: github.event_name == 'schedule' || inputs.blenderproc
     runs-on: ubuntu-latest
     env:
-      BPP_BLENDERPROC_EXECUTABLE: ${{ github.workspace }}/tools/blenderproc-worker/.venv/bin/blenderproc
+      BOP_BLENDERPROC_EXECUTABLE: ${{ github.workspace }}/tools/blenderproc-worker/.venv/bin/blenderproc
     steps:
       - uses: actions/checkout@v4
       - name: Install Blender's system libraries
@@ -75,15 +76,15 @@ jobs:
         with:
           key: hardware-blenderproc
       - name: Require a working BlenderProc runtime
-        run: cargo run --locked -p bpp-cli --features blenderproc -- doctor --renderer blenderproc
-      - run: cargo test --locked -p bpp-render-blenderproc --test worker_supervision -- --ignored real_worker
+        run: cargo run --locked -p bop-cli --features blenderproc -- doctor --renderer blenderproc
+      - run: cargo test --locked -p bop-render-blenderproc --test worker_supervision -- --ignored real_worker
 
   cross-backend:
     name: Cross-backend geometry (Metal + BlenderProc)
     if: inputs.runner == 'self-hosted-macos' && inputs.blenderproc
     runs-on: [self-hosted, macOS, ARM64]
     env:
-      BPP_BLENDERPROC_EXECUTABLE: ${{ github.workspace }}/tools/blenderproc-worker/.venv/bin/blenderproc
+      BOP_BLENDERPROC_EXECUTABLE: ${{ github.workspace }}/tools/blenderproc-worker/.venv/bin/blenderproc
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -92,6 +93,6 @@ jobs:
       - run: rustup toolchain install
       - name: Require both runtimes
         run: |
-          cargo run --locked -p bpp-cli -- doctor --renderer wgpu
-          cargo run --locked -p bpp-cli --features blenderproc -- doctor --renderer blenderproc
-      - run: cargo test --locked -p bpp-render-blenderproc --test cross_backend_geometry -- --ignored
+          cargo run --locked -p bop-cli -- doctor --renderer wgpu
+          cargo run --locked -p bop-cli --features blenderproc -- doctor --renderer blenderproc
+      - run: cargo test --locked -p bop-render-blenderproc --test cross_backend_geometry -- --ignored

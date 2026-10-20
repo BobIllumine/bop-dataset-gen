@@ -12,7 +12,7 @@ on any worker. This is what makes parallelism and resume safe.
 
 ## Seed derivation
 
-`SeedDeriver` (in `bpp-core`) turns a master seed into independent streams:
+`SeedDeriver` (in `bop-core`) turns a master seed into independent streams:
 
 1. The master seed is encoded as 8 little-endian bytes and passed to BLAKE3's
    key-derivation function with the context `bpp.dataset.seed-master.v1`.
@@ -24,7 +24,7 @@ on any worker. This is what makes parallelism and resume safe.
 Stages are `population`, `placement`, `camera`, and `appearance`. Because each
 stage has its own stream, changing a camera setting cannot change where
 objects land. The protocol is pinned by known test vectors in
-`crates/bpp-core/tests/seed_derivation.rs`; changing any label or encoding is
+`crates/bop-core/tests/seed_derivation.rs`; changing any label or encoding is
 a protocol version change.
 
 ## Attempts and rejection

@@ -41,6 +41,14 @@
           },
           "type": "array"
         },
+        "environment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentWire"
+            }
+          ],
+          "description": "An HDR environment map (`.hdr` or `.exr`, equirectangular) lighting the\nscene instead of `ambient`."
+        },
         "material_defaults": {
           "$ref": "#/$defs/PbrMaterialWire"
         },
@@ -162,6 +170,85 @@
       ],
       "type": "object"
     },
+    "BinEntryWire": {
+      "additionalProperties": false,
+      "description": "One of several bins: the `[bin]` fields plus an identifier and a population.",
+      "properties": {
+        "floor_thickness_m": {
+          "$ref": "#/$defs/PositiveF32Schema"
+        },
+        "id": {
+          "$ref": "#/$defs/NonBlankStringSchema",
+          "description": "Unique, nonblank; recorded on every object dropped into this bin."
+        },
+        "inner_dimensions_m": {
+          "items": {
+            "$ref": "#/$defs/PositiveF32Schema"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "material_label": {
+          "$ref": "#/$defs/NonBlankStringSchema"
+        },
+        "physical_properties": {
+          "$ref": "#/$defs/SurfacePhysicalPropertiesWire"
+        },
+        "population": {
+          "$ref": "#/$defs/PopulationWire"
+        },
+        "render_material": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BinRenderMaterialWire"
+            }
+          ]
+        },
+        "wall_thickness_m": {
+          "$ref": "#/$defs/PositiveF32Schema"
+        },
+        "world_from_bin": {
+          "$ref": "#/$defs/TransformWire"
+        }
+      },
+      "required": [
+        "id",
+        "inner_dimensions_m",
+        "floor_thickness_m",
+        "wall_thickness_m",
+        "world_from_bin",
+        "material_label",
+        "physical_properties",
+        "population"
+      ],
+      "type": "object"
+    },
+    "BinRenderMaterialWire": {
+      "additionalProperties": false,
+      "properties": {
+        "base_color_srgb": {
+          "items": {
+            "$ref": "#/$defs/UnitF32Schema"
+          },
+          "maxItems": 4,
+          "minItems": 4,
+          "type": "array"
+        },
+        "metallic": {
+          "$ref": "#/$defs/UnitF32Schema"
+        },
+        "roughness": {
+          "$ref": "#/$defs/UnitF32Schema"
+        }
+      },
+      "required": [
+        "base_color_srgb",
+        "metallic",
+        "roughness"
+      ],
+      "type": "object"
+    },
     "BinWire": {
       "additionalProperties": false,
       "properties": {
@@ -182,6 +269,13 @@
         "physical_properties": {
           "$ref": "#/$defs/SurfacePhysicalPropertiesWire"
         },
+        "render_material": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BinRenderMaterialWire"
+            }
+          ]
+        },
         "wall_thickness_m": {
           "$ref": "#/$defs/PositiveF32Schema"
         },
@@ -199,20 +293,51 @@
       ],
       "type": "object"
     },
+    "BlenderProcDenoiserWire": {
+      "enum": [
+        "none",
+        "oidn",
+        "optix"
+      ],
+      "type": "string"
+    },
     "BlenderProcRendererWire": {
       "additionalProperties": false,
       "properties": {
+        "denoiser": {
+          "$ref": "#/$defs/BlenderProcDenoiserWire",
+          "description": "RGB denoiser. Default `oidn`."
+        },
         "device_selection": {
           "$ref": "#/$defs/NonBlankStringSchema"
         },
         "executable_path": {
           "$ref": "#/$defs/NonBlankStringSchema"
         },
+        "glossy_bounces": {
+          "default": 1,
+          "description": "Light bounces off glossy surfaces; 0 makes metals reflect only direct\nlight. Default 1.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
         "handshake_timeout_s": {
           "$ref": "#/$defs/PositiveF32Schema"
         },
+        "noise_threshold": {
+          "default": 0.009999999776482582,
+          "description": "Adaptive-sampling noise threshold; 0 disables adaptive sampling. Default 0.01.",
+          "format": "float",
+          "minimum": 0.0,
+          "type": "number"
+        },
         "request_timeout_s": {
           "$ref": "#/$defs/PositiveF32Schema"
+        },
+        "samples": {
+          "$ref": "#/$defs/PositiveU32Schema",
+          "default": 128,
+          "description": "Maximum Cycles samples per pixel. Default 128."
         },
         "stderr_tail_capacity": {
           "$ref": "#/$defs/PositiveU32Schema"
@@ -616,6 +741,32 @@
         }
       ]
     },
+    "EnvironmentWire": {
+      "additionalProperties": false,
+      "properties": {
+        "intensity": {
+          "default": 1.0,
+          "description": "Radiance scale. Default 1.",
+          "format": "float",
+          "minimum": 0.0,
+          "type": "number"
+        },
+        "path": {
+          "$ref": "#/$defs/NonBlankStringSchema",
+          "description": "Image path, relative to the configuration file."
+        },
+        "rotation_deg": {
+          "default": 0.0,
+          "description": "Rotation about world +Z in degrees. Default 0.",
+          "format": "float",
+          "type": "number"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
     "ImageSizeWire": {
       "additionalProperties": false,
       "properties": {
@@ -652,6 +803,10 @@
       "properties": {
         "depth": {
           "type": "boolean"
+        },
+        "png_compression": {
+          "$ref": "#/$defs/PngCompressionWire",
+          "description": "PNG compression for RGB and instance frames: `fast` (default),\n`balanced` or `high`. Pixels are identical at every level."
         },
         "rgb": {
           "type": "boolean"
@@ -783,6 +938,14 @@
         "solver_iterations"
       ],
       "type": "object"
+    },
+    "PngCompressionWire": {
+      "enum": [
+        "fast",
+        "balanced",
+        "high"
+      ],
+      "type": "string"
     },
     "PointLightWire": {
       "additionalProperties": false,
@@ -1159,10 +1322,22 @@
         "adapter_preference": {
           "$ref": "#/$defs/WgpuAdapterPreferenceWire"
         },
+        "ambient_occlusion_radius_m": {
+          "default": 0.699999988079071,
+          "description": "Ambient-occlusion search radius in metres, about the size of the bin;\n0 disables occlusion. Default 0.7.",
+          "format": "float",
+          "minimum": 0.0,
+          "type": "number"
+        },
         "device_preference": {
           "$ref": "#/$defs/WgpuDevicePreferenceWire"
         },
         "rgb_fxaa": {
+          "type": "boolean"
+        },
+        "screen_space_reflections": {
+          "default": true,
+          "description": "Glossy surfaces reflect what the camera sees (bin walls, other parts)\nbefore falling back to the environment. Default true.",
           "type": "boolean"
         },
         "shadow_map_size": {
@@ -1181,6 +1356,38 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "The complete unchecked v1 TOML input shape.\n\nLocal scalar and structural constraints are represented in this schema.\nCross-field ordering, references, uniqueness, and aggregate constraints are\nenforced by `RunConfig` validation after deserialization.",
+  "oneOf": [
+    {
+      "not": {
+        "required": [
+          "bins"
+        ]
+      },
+      "required": [
+        "bin",
+        "population"
+      ]
+    },
+    {
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "bin"
+            ]
+          },
+          {
+            "required": [
+              "population"
+            ]
+          }
+        ]
+      },
+      "required": [
+        "bins"
+      ]
+    }
+  ],
   "properties": {
     "appearance": {
       "$ref": "#/$defs/AppearanceWire"
@@ -1193,7 +1400,16 @@
       "type": "array"
     },
     "bin": {
-      "$ref": "#/$defs/BinWire"
+      "$ref": "#/$defs/BinWire",
+      "description": "The single bin. Use either `bin` with `population`, or `bins`."
+    },
+    "bins": {
+      "description": "Several bins, each with its own population. Replaces `bin` and `population`.",
+      "items": {
+        "$ref": "#/$defs/BinEntryWire"
+      },
+      "minItems": 1,
+      "type": "array"
     },
     "cameras": {
       "items": {
@@ -1209,7 +1425,8 @@
       "$ref": "#/$defs/PhysicsWire"
     },
     "population": {
-      "$ref": "#/$defs/PopulationWire"
+      "$ref": "#/$defs/PopulationWire",
+      "description": "Objects dropped into the single `bin`."
     },
     "renderers": {
       "$ref": "#/$defs/RenderersWire"
@@ -1220,9 +1437,7 @@
   },
   "required": [
     "run",
-    "bin",
     "assets",
-    "population",
     "physics",
     "cameras",
     "appearance",

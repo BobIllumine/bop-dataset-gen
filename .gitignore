@@ -1,10 +1,19 @@
 /target
+/out/
 superpowers/
 /.worktrees/
 /.idea
 .DS_Store
 codex-session-*.md
 
-# LEARN exercises are kept locally only.
-/docs/book/learn-*.md
-/crates/bpp-pipeline/tests/learn_02.rs
+# Worker virtualenv created by `uv sync` in tools/blenderproc-worker.
+/tools/blenderproc-worker/.venv/
+
+# Local deployment settings with credentials.
+/deploy/.env
+
+# Python bytecode from the BlenderProc worker.
+__pycache__/
+
+# Default data directory of a locally run bop-server.
+/bop-data/

@@ -1,0 +1,1364 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "bop-server",
+    "description": "Job API for deterministic bin-picking dataset generation.",
+    "license": {
+      "name": "GPL-3.0-or-later",
+      "identifier": "GPL-3.0-or-later"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/v1/asset-optimizations": {
+      "post": {
+        "tags": [
+          "assets"
+        ],
+        "summary": "Welds and simplifies a library mesh within a deviation budget, and stores\nthe result next to it. An earlier result for the same source is replaced.",
+        "operationId": "optimize_asset",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OptimizeAsset"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OptimizedAssetReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assets": {
+      "get": {
+        "tags": [
+          "assets"
+        ],
+        "summary": "Lists the asset library, sorted by path.",
+        "operationId": "list_assets",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/StoredObject"
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/assets/{path}": {
+      "get": {
+        "tags": [
+          "assets"
+        ],
+        "summary": "Downloads one asset file.",
+        "operationId": "get_asset",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "path",
+            "description": "Asset path inside the library, e.g. `cup/cup.glb`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The file.",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "int32",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "assets"
+        ],
+        "summary": "Uploads or replaces one asset file (at most 64 MiB).",
+        "operationId": "put_asset",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "path",
+            "description": "Asset path inside the library, e.g. `cup/cup.glb`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadedAsset"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "assets"
+        ],
+        "summary": "Deletes one asset file.",
+        "operationId": "delete_asset",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "path",
+            "description": "Asset path inside the library.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth": {
+      "get": {
+        "tags": [
+          "server"
+        ],
+        "summary": "Reports which credentials the API accepts. Needs no credentials itself.",
+        "operationId": "auth_info",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthInfo"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/api/v1/configs/validate": {
+      "post": {
+        "tags": [
+          "configs"
+        ],
+        "summary": "Checks a configuration exactly as job submission would, without queuing a job.",
+        "operationId": "validate_config",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValidateConfig"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigReport"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Lists jobs, newest first.",
+        "operationId": "list_jobs",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Most jobs to return, newest first; 1 to 1000, default 100.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Job"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Queues a job.",
+        "operationId": "create_job",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateJob"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Reports one job.",
+        "operationId": "get_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job identifier.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/cancel": {
+      "post": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Cancels a queued job at once, or a running one after its in-flight scenes commit.",
+        "operationId": "cancel_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job identifier.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The running job will stop."
+          },
+          "204": {
+            "description": "A queued job was cancelled."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/config": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Returns the configuration TOML the job was submitted with.",
+        "operationId": "get_job_config",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job identifier.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/toml": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/events": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Streams the job's current state, then every change, as server-sent `job` events.",
+        "description": "The first event carries a full `Job`; later ones a `JobEvent`.",
+        "operationId": "job_events",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job identifier.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Server-sent events named `job`.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobEvent"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/exports": {
+      "post": {
+        "tags": [
+          "exports"
+        ],
+        "summary": "Packs a succeeded job into an uncompressed tar (once; later requests reuse\nit) and returns a download link.",
+        "operationId": "create_export",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job identifier.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateExport"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportLink"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/exports/{file}": {
+      "get": {
+        "tags": [
+          "exports"
+        ],
+        "summary": "Downloads a packed export through the API, for storage that cannot sign URLs.",
+        "operationId": "get_export",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job identifier.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "file",
+            "in": "path",
+            "description": "`dataset.tar` or `bop.tar`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The archive.",
+            "content": {
+              "application/x-tar": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "int32",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/files": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Lists the job's stored result files.",
+        "operationId": "list_job_files",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job identifier.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/StoredObject"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/files/{path}": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Downloads one result file.",
+        "operationId": "get_job_file",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job identifier.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "File path as `/files` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The file.",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "int32",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/resume": {
+      "post": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Queues a failed or cancelled job again; it continues from its committed scenes.",
+        "operationId": "resume_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job identifier.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {},
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/version": {
+      "get": {
+        "tags": [
+          "server"
+        ],
+        "summary": "Reports the server version, API version, and compiled renderers.",
+        "operationId": "server_info",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServerInfo"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ApiError": {
+        "type": "object",
+        "description": "Why a request failed.",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Human-readable reason."
+          }
+        }
+      },
+      "AuthInfo": {
+        "type": "object",
+        "description": "How to sign in to this server.",
+        "required": [
+          "required",
+          "api_token"
+        ],
+        "properties": {
+          "api_token": {
+            "type": "boolean",
+            "description": "Whether a shared `BOP_API_TOKEN` is accepted."
+          },
+          "oidc": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OidcInfo",
+                "description": "The OIDC provider whose access tokens are accepted, if any."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "required": {
+            "type": "boolean",
+            "description": "Whether `/api` routes other than this one need a bearer token."
+          }
+        }
+      },
+      "ConfigReport": {
+        "type": "object",
+        "description": "What a valid configuration would run.",
+        "required": [
+          "total_scenes",
+          "asset_paths",
+          "missing_assets"
+        ],
+        "properties": {
+          "asset_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Asset library paths the run reads."
+          },
+          "missing_assets": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Of those, the ones not uploaded yet; a job is refused until this is empty."
+          },
+          "total_scenes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Requested scene count.",
+            "minimum": 0
+          }
+        }
+      },
+      "CreateExport": {
+        "type": "object",
+        "description": "An export request.",
+        "required": [
+          "format"
+        ],
+        "properties": {
+          "expires_in_s": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Link lifetime in seconds, 60 to 604800 (7 days). Default 86400.",
+            "minimum": 0
+          },
+          "format": {
+            "$ref": "#/components/schemas/ExportFormat",
+            "description": "What to pack."
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateJob": {
+        "type": "object",
+        "description": "A job submission.",
+        "required": [
+          "config",
+          "renderer"
+        ],
+        "properties": {
+          "config": {
+            "type": "string",
+            "description": "Run configuration TOML; asset paths are relative to the asset library."
+          },
+          "export_bop": {
+            "type": "boolean",
+            "description": "Also store a BOP export when the dataset is complete. Default true."
+          },
+          "renderer": {
+            "type": "string",
+            "description": "`wgpu` or `blenderproc`."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExportFormat": {
+        "type": "string",
+        "description": "What an export archive holds.",
+        "enum": [
+          "dataset",
+          "bop"
+        ]
+      },
+      "ExportLink": {
+        "type": "object",
+        "description": "A download link for a packed export.",
+        "required": [
+          "format",
+          "url",
+          "signed",
+          "size",
+          "file_name"
+        ],
+        "properties": {
+          "expires_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When a signed `url` stops working."
+          },
+          "file_name": {
+            "type": "string",
+            "description": "Suggested file name."
+          },
+          "format": {
+            "$ref": "#/components/schemas/ExportFormat",
+            "description": "What the archive holds."
+          },
+          "signed": {
+            "type": "boolean",
+            "description": "Whether `url` is a presigned storage URL that needs no credentials."
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Archive size in bytes.",
+            "minimum": 0
+          },
+          "url": {
+            "type": "string",
+            "description": "Presigned storage URL, or an API path (relative to the server) when the\nstorage cannot sign."
+          }
+        }
+      },
+      "Job": {
+        "type": "object",
+        "description": "A job as the API reports it; the configuration is fetched separately.",
+        "required": [
+          "id",
+          "state",
+          "renderer",
+          "export_bop",
+          "total_scenes",
+          "committed_scenes",
+          "created_at_ms",
+          "updated_at_ms",
+          "cancel_requested"
+        ],
+        "properties": {
+          "cancel_requested": {
+            "type": "boolean",
+            "description": "A cancel was requested while the job is running; it stops once its\nin-flight scenes commit. Not stored: only the running server knows."
+          },
+          "committed_scenes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Scenes committed so far, including ones from earlier attempts."
+          },
+          "created_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Submission time."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the job failed."
+          },
+          "export_bop": {
+            "type": "boolean",
+            "description": "Whether a BOP export is stored with the dataset."
+          },
+          "finished_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the job last reached a terminal state."
+          },
+          "id": {
+            "type": "string",
+            "description": "Random identifier, also the storage prefix below `datasets/`."
+          },
+          "renderer": {
+            "type": "string",
+            "description": "`wgpu` or `blenderproc`."
+          },
+          "started_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the latest attempt started."
+          },
+          "state": {
+            "$ref": "#/components/schemas/JobState",
+            "description": "Lifecycle state."
+          },
+          "total_scenes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Scenes the configuration requests."
+          },
+          "updated_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last state or progress change."
+          }
+        }
+      },
+      "JobEvent": {
+        "type": "object",
+        "description": "A change to one job, broadcast to event-stream subscribers.",
+        "required": [
+          "job_id",
+          "state",
+          "committed_scenes",
+          "total_scenes",
+          "cancel_requested"
+        ],
+        "properties": {
+          "cancel_requested": {
+            "type": "boolean",
+            "description": "A cancel is pending; see [`Job::cancel_requested`]."
+          },
+          "committed_scenes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Scenes committed so far."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Failure message, for a failed job."
+          },
+          "job_id": {
+            "type": "string",
+            "description": "Job identifier."
+          },
+          "state": {
+            "$ref": "#/components/schemas/JobState",
+            "description": "State after the change."
+          },
+          "total_scenes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Requested scenes."
+          }
+        }
+      },
+      "JobState": {
+        "type": "string",
+        "description": "Where a job is in its lifecycle.",
+        "enum": [
+          "queued",
+          "running",
+          "finalizing",
+          "succeeded",
+          "failed",
+          "cancelled"
+        ]
+      },
+      "OidcInfo": {
+        "type": "object",
+        "description": "An OIDC provider a browser can sign in with (authorization code\nwith PKCE, as a public client).",
+        "required": [
+          "issuer",
+          "client_id",
+          "scopes"
+        ],
+        "properties": {
+          "client_id": {
+            "type": "string",
+            "description": "Client to sign in as."
+          },
+          "issuer": {
+            "type": "string",
+            "description": "Issuer URL; its discovery document is at `.well-known/openid-configuration`."
+          },
+          "scopes": {
+            "type": "string",
+            "description": "Space-separated scopes to request."
+          }
+        }
+      },
+      "OptimizeAsset": {
+        "type": "object",
+        "description": "A library file to optimize.",
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "crease_angle_deg": {
+            "type": "number",
+            "format": "float",
+            "description": "Faces meeting at a sharper angle keep separate normals. Default 30."
+          },
+          "max_deviation_mm": {
+            "type": "number",
+            "format": "float",
+            "description": "Largest allowed surface deviation in millimetres; 0 only welds\nduplicate vertices. Default 0.1."
+          },
+          "path": {
+            "type": "string",
+            "description": "Source path inside the library: an `.stl` or `.glb` file."
+          },
+          "source_unit_scale_m": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Metres per STL unit, e.g. 0.001 for millimetres. Required for STL;\nGLB is always metres."
+          }
+        },
+        "additionalProperties": false
+      },
+      "OptimizedAssetReport": {
+        "type": "object",
+        "description": "The optimized asset and what changed.",
+        "required": [
+          "path",
+          "source_bytes",
+          "bytes",
+          "source_triangles",
+          "triangles",
+          "source_vertices",
+          "vertices",
+          "max_deviation_mm"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Optimized file size in bytes.",
+            "minimum": 0
+          },
+          "max_deviation_mm": {
+            "type": "number",
+            "format": "float",
+            "description": "Largest measured distance between the source and optimized surfaces, in millimetres."
+          },
+          "path": {
+            "type": "string",
+            "description": "Path of the written GLB, next to the source as `<name>.optimized.glb`.\nIt is in metres, so configurations use `source_unit_scale_m = 1.0`."
+          },
+          "source_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Source file size in bytes.",
+            "minimum": 0
+          },
+          "source_triangles": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Source triangle count.",
+            "minimum": 0
+          },
+          "source_vertices": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Source vertex count.",
+            "minimum": 0
+          },
+          "triangles": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Optimized triangle count.",
+            "minimum": 0
+          },
+          "vertices": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Optimized vertex count.",
+            "minimum": 0
+          }
+        }
+      },
+      "ServerInfo": {
+        "type": "object",
+        "description": "What this server is and can do.",
+        "required": [
+          "server",
+          "api",
+          "renderers",
+          "max_scenes",
+          "signed_exports"
+        ],
+        "properties": {
+          "api": {
+            "type": "string",
+            "description": "API version, the path segment after `/api/`."
+          },
+          "max_scenes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Largest `valid_scene_count` a job may request.",
+            "minimum": 0
+          },
+          "renderers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Renderers compiled into this build."
+          },
+          "server": {
+            "type": "string",
+            "description": "`bop-server` version."
+          },
+          "signed_exports": {
+            "type": "boolean",
+            "description": "Whether export links are presigned storage URLs rather than API routes."
+          }
+        }
+      },
+      "StoredObject": {
+        "type": "object",
+        "description": "One stored object.",
+        "required": [
+          "path",
+          "size"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Key relative to the listed prefix."
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Size in bytes.",
+            "minimum": 0
+          }
+        }
+      },
+      "UploadedAsset": {
+        "type": "object",
+        "description": "An uploaded asset's library path.",
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path inside the library, as configurations reference it."
+          }
+        }
+      },
+      "ValidateConfig": {
+        "type": "object",
+        "description": "A configuration to check.",
+        "required": [
+          "config"
+        ],
+        "properties": {
+          "config": {
+            "type": "string",
+            "description": "Run configuration TOML; asset paths are relative to the asset library."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "security": [
+    {
+      "bearer": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "server",
+      "description": "Server identity and capabilities."
+    },
+    {
+      "name": "assets",
+      "description": "The shared asset library."
+    },
+    {
+      "name": "configs",
+      "description": "Run configurations."
+    },
+    {
+      "name": "jobs",
+      "description": "Generation jobs and their results."
+    },
+    {
+      "name": "exports",
+      "description": "Packed downloads of finished jobs."
+    }
+  ]
+}

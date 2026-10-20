@@ -67,7 +67,7 @@ fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
         output,
         output_is_explicit,
     } = parse_args(args)?;
-    let generated = bpp_core::run_config_json_schema();
+    let generated = bop_core::run_config_json_schema();
     write_or_check_schema(&output, generated.as_bytes(), mode).map_err(|error| {
         if matches!(error, SchemaError::Drift(_)) {
             if output_is_explicit {
@@ -182,7 +182,7 @@ mod tests {
         fn new() -> Self {
             let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
             let path =
-                std::env::temp_dir().join(format!("bpp-xtask-schema-{}-{id}", std::process::id()));
+                std::env::temp_dir().join(format!("bop-xtask-schema-{}-{id}", std::process::id()));
             fs::create_dir(&path).expect("unique test directory");
             Self(path)
         }

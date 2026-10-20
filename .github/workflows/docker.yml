@@ -1,0 +1,104 @@
+name: Docker image
+
+# Builds deploy/Dockerfile. After CI passes on a push to master, the image is
+# pushed to Docker Hub as `latest` and `sha-<commit>`; version tags (v*) are
+# pushed as the version once CI for that tag passes. Pull requests that touch
+# the image build it without pushing.
+#
+# Repository settings needed for pushing:
+#   variable DOCKERHUB_USERNAME   Docker Hub account (or organization)
+#   variable DOCKERHUB_IMAGE      optional; defaults to <DOCKERHUB_USERNAME>/bop-server
+#   secret   DOCKERHUB_TOKEN      access token with Read & Write scope
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [master]
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - deploy/**
+      - .dockerignore
+      - Cargo.lock
+      - rust-toolchain.toml
+      - tools/blenderproc-worker/**
+      - .github/workflows/docker.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.event.workflow_run.head_branch || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    # Tag pushes do not run CI, so run it here before publishing a release image.
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/ci.yml
+
+  image:
+    name: Build${{ github.event_name != 'pull_request' && ' and push' || '' }}
+    needs: [test]
+    # Runs when `test` was skipped (not a tag push) but never after it failed.
+    if: >-
+      !cancelled() && needs.test.result != 'failure' && (
+        github.event_name != 'workflow_run' || (
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.event == 'push'
+        )
+      )
+    runs-on: ubuntu-latest
+    env:
+      PUSH: ${{ github.event_name != 'pull_request' }}
+      IMAGE: ${{ vars.DOCKERHUB_IMAGE || format('{0}/bop-server', vars.DOCKERHUB_USERNAME) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # A workflow_run event otherwise checks out the default branch.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - name: Check the Docker Hub settings
+        if: env.PUSH == 'true'
+        env:
+          TOKEN_SET: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+        run: |
+          if [ -z "${{ vars.DOCKERHUB_USERNAME }}" ] || [ "$TOKEN_SET" != true ]; then
+            echo "::error::set the DOCKERHUB_USERNAME variable and DOCKERHUB_TOKEN secret"
+            exit 1
+          fi
+      # The Rust build and Blender together need more than the runner's free space.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: env.PUSH == 'true'
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # metadata-action's sha tag would use the default branch head on workflow_run.
+      - id: commit
+        run: echo "short=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch' }}
+            type=raw,value=sha-${{ steps.commit.outputs.short }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64
+          push: ${{ env.PUSH == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

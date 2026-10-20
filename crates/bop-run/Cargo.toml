@@ -1,0 +1,25 @@
+[package]
+name = "bop-run"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = ["fast", "wgpu"]
+fast = ["bop-pipeline/fast"]
+reproducible = ["bop-pipeline/reproducible"]
+wgpu = ["dep:bop-render-wgpu"]
+blenderproc = ["dep:bop-render-blenderproc"]
+
+[lints]
+workspace = true
+
+[dependencies]
+bop-pipeline = { path = "../bop-pipeline", default-features = false }
+bop-core = { path = "../bop-core" }
+bop-render-api = { path = "../bop-render-api" }
+bop-render-wgpu = { path = "../bop-render-wgpu", optional = true }
+bop-render-blenderproc = { path = "../bop-render-blenderproc", optional = true }
+thiserror = "2"

@@ -1,0 +1,496 @@
+//! API behaviour against `SQLite` and local storage, without running jobs.
+
+use axum::{
+    Router,
+    body::{Body, to_bytes},
+    http::{Request, StatusCode, header},
+};
+use serde_json::Value;
+use tower::ServiceExt as _;
+
+const CONFIG: &str = include_str!("../../../examples/cup_nippel/cup_nippel.toml");
+
+async fn app(root: &std::path::Path, token: Option<&str>) -> Router {
+    app_with(root, token, None).await
+}
+
+async fn app_with(root: &std::path::Path, token: Option<&str>, cors: Option<&str>) -> Router {
+    let root = root.to_owned();
+    let token = token.map(str::to_owned);
+    let cors = cors.map(str::to_owned);
+    let settings = bop_server::settings::Settings::from_vars(move |name| match name {
+        "BOP_DATA_DIR" => Some(root.display().to_string()),
+        "BOP_API_TOKEN" => token.clone(),
+        "BOP_MAX_SCENES" => Some("1000".to_owned()),
+        "BOP_CORS_ORIGINS" => cors.clone(),
+        _ => None,
+    })
+    .unwrap();
+    bop_server::build(settings).await.unwrap().0
+}
+
+/// Sends a bodiless request and returns the status, headers, and raw body.
+async fn fetch(app: &Router, method: &str, uri: &str) -> (StatusCode, header::HeaderMap, Vec<u8>) {
+    let request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let (parts, body) = response.into_parts();
+    let bytes = to_bytes(body, usize::MAX).await.unwrap();
+    (parts.status, parts.headers, bytes.to_vec())
+}
+
+async fn send(app: &Router, method: &str, uri: &str, body: Body) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(body)
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// A submission that leaves `export_bop` to its default (true).
+fn job(config: &str) -> Body {
+    Body::from(serde_json::json!({ "config": config, "renderer": "wgpu" }).to_string())
+}
+
+#[tokio::test]
+async fn jobs_need_their_assets_and_move_through_cancel_and_resume() {
+    let root = tempfile::tempdir().unwrap();
+    let app = app(root.path(), None).await;
+
+    let (status, body) = send(&app, "POST", "/api/v1/jobs", job(CONFIG)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("has not been uploaded")
+    );
+
+    for asset in ["cup/cup.glb", "nippel/nippel.glb"] {
+        let (status, _) = send(
+            &app,
+            "PUT",
+            &format!("/api/v1/assets/{asset}"),
+            Body::from(vec![0_u8; 16]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    let (_, assets) = send(&app, "GET", "/api/v1/assets", Body::empty()).await;
+    assert_eq!(assets[0]["path"], "cup/cup.glb");
+    assert_eq!(assets[1]["size"], 16);
+
+    let (status, created) = send(&app, "POST", "/api/v1/jobs", job(CONFIG)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(created["state"], "queued");
+    assert_eq!(created["total_scenes"], 400);
+    assert_eq!(created["export_bop"], true);
+    assert_eq!(created["cancel_requested"], false);
+    let id = created["id"].as_str().unwrap();
+
+    let (status, listed) = send(&app, "GET", "/api/v1/jobs", Body::empty()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listed[0]["id"], id);
+
+    let (status, _) = send(
+        &app,
+        "POST",
+        &format!("/api/v1/jobs/{id}/cancel"),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, cancelled) = send(&app, "GET", &format!("/api/v1/jobs/{id}"), Body::empty()).await;
+    assert_eq!(cancelled["state"], "cancelled");
+    assert!(cancelled["finished_at_ms"].is_i64());
+
+    let (status, _) = send(
+        &app,
+        "POST",
+        &format!("/api/v1/jobs/{id}/resume"),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let (_, resumed) = send(&app, "GET", &format!("/api/v1/jobs/{id}"), Body::empty()).await;
+    assert_eq!(resumed["state"], "queued");
+    let (status, _) = send(
+        &app,
+        "POST",
+        &format!("/api/v1/jobs/{id}/resume"),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (status, _) = send(&app, "GET", "/api/v1/jobs/missing", Body::empty()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn submissions_cannot_escape_the_asset_library_or_exceed_limits() {
+    let root = tempfile::tempdir().unwrap();
+    let app = app(root.path(), None).await;
+
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/api/v1/assets/..%2Fescape.glb",
+        Body::from("x"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let absolute = CONFIG.replace("\"cup/cup.glb\"", "\"/etc/cup.glb\"");
+    let (status, body) = send(&app, "POST", "/api/v1/jobs", job(&absolute)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body["error"].as_str().unwrap().contains("relative"));
+
+    let huge = CONFIG.replace("valid_scene_count = 400", "valid_scene_count = 5000");
+    let (status, body) = send(&app, "POST", "/api/v1/jobs", job(&huge)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body["error"].as_str().unwrap().contains("limit of 1000"));
+
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/api/v1/jobs",
+        Body::from(serde_json::json!({ "config": CONFIG, "renderer": "povray" }).to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_configured_token_guards_the_api_but_not_the_health_check() {
+    let root = tempfile::tempdir().unwrap();
+    let app = app(root.path(), Some("secret")).await;
+    let (status, _) = send(&app, "GET", "/api/v1/jobs", Body::empty()).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let request = Request::builder()
+        .uri("/api/v1/jobs")
+        .header(header::AUTHORIZATION, "Bearer secret")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(request).await.unwrap().status(),
+        StatusCode::OK
+    );
+    let health = Request::builder()
+        .uri("/healthz")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(app.oneshot(health).await.unwrap().status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn version_names_the_api_and_the_compiled_renderers() {
+    let root = tempfile::tempdir().unwrap();
+    let app = app(root.path(), None).await;
+    let (status, info) = send(&app, "GET", "/api/v1/version", Body::empty()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(info["api"], "v1");
+    assert_eq!(info["server"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(info["max_scenes"], 1000);
+    assert_eq!(info["signed_exports"], false);
+    assert!(
+        info["renderers"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::from("wgpu"))
+    );
+}
+
+#[tokio::test]
+async fn assets_download_and_configs_validate_without_queuing_a_job() {
+    let root = tempfile::tempdir().unwrap();
+    let app = app(root.path(), None).await;
+    let validate = |config: &str| Body::from(serde_json::json!({ "config": config }).to_string());
+
+    let (status, report) = send(&app, "POST", "/api/v1/configs/validate", validate(CONFIG)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(report["total_scenes"], 400);
+    assert_eq!(
+        report["missing_assets"],
+        serde_json::json!(["cup/cup.glb", "nippel/nippel.glb"])
+    );
+
+    for asset in ["cup/cup.glb", "nippel/nippel.glb"] {
+        send(
+            &app,
+            "PUT",
+            &format!("/api/v1/assets/{asset}"),
+            Body::from(asset.as_bytes().to_vec()),
+        )
+        .await;
+    }
+    let (_, report) = send(&app, "POST", "/api/v1/configs/validate", validate(CONFIG)).await;
+    assert_eq!(report["missing_assets"], serde_json::json!([]));
+    let (_, jobs) = send(&app, "GET", "/api/v1/jobs", Body::empty()).await;
+    assert_eq!(jobs, serde_json::json!([]));
+
+    let (status, headers, body) = fetch(&app, "GET", "/api/v1/assets/cup/cup.glb").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CONTENT_TYPE], "model/gltf-binary");
+    assert_eq!(body, b"cup/cup.glb");
+    let (status, _, _) = fetch(&app, "GET", "/api/v1/assets/cup/missing.glb").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/v1/configs/validate",
+        validate("[run]\nmaster_seed = 1\n"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("invalid config")
+    );
+}
+
+#[tokio::test]
+async fn succeeded_jobs_export_as_tar_archives_through_the_api_on_local_storage() {
+    let root = tempfile::tempdir().unwrap();
+    let app = app(root.path(), None).await;
+    for asset in ["cup/cup.glb", "nippel/nippel.glb"] {
+        send(
+            &app,
+            "PUT",
+            &format!("/api/v1/assets/{asset}"),
+            Body::from(vec![0_u8; 4]),
+        )
+        .await;
+    }
+    let (_, created) = send(&app, "POST", "/api/v1/jobs", job(CONFIG)).await;
+    let id = created["id"].as_str().unwrap().to_owned();
+    let export = |format: &str| {
+        Body::from(serde_json::json!({ "format": format, "expires_in_s": 3600 }).to_string())
+    };
+    let exports = format!("/api/v1/jobs/{id}/exports");
+
+    let (status, _) = send(&app, "POST", &exports, export("dataset")).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // Stand in for the runner: store a finished dataset and mark the job done.
+    let storage = bop_server::storage::Storage::from_url(&format!(
+        "file://{}/storage",
+        root.path().display()
+    ))
+    .unwrap();
+    for (path, body) in [
+        ("manifest.json", "{}"),
+        ("scenes/000000/scene.json", "{\"objects\":[]}"),
+        ("bop/scene_gt.json", "[]"),
+    ] {
+        storage
+            .put(&format!("datasets/{id}/{path}"), body.as_bytes().to_vec())
+            .await
+            .unwrap();
+    }
+    let jobs = bop_server::db::JobStore::connect(&format!(
+        "sqlite://{}?mode=rwc",
+        root.path().join("bop.db").display()
+    ))
+    .await
+    .unwrap();
+    jobs.set_state(&id, bop_server::db::JobState::Succeeded, None)
+        .await
+        .unwrap();
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        &exports,
+        Body::from(serde_json::json!({ "format": "dataset", "expires_in_s": 5 }).to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("expires_in_s"));
+
+    for (format, expected) in [
+        (
+            "dataset",
+            vec![
+                format!("dataset-{id}/manifest.json"),
+                format!("dataset-{id}/scenes/000000/scene.json"),
+            ],
+        ),
+        ("bop", vec![format!("bop-{id}/scene_gt.json")]),
+    ] {
+        let (status, link) = send(&app, "POST", &exports, export(format)).await;
+        assert_eq!(status, StatusCode::OK, "{link}");
+        assert_eq!(link["signed"], false);
+        assert_eq!(link["expires_at_ms"], Value::Null);
+        assert_eq!(link["file_name"], format!("{format}-{id}.tar"));
+        let url = link["url"].as_str().unwrap();
+        assert_eq!(url, format!("/api/v1/jobs/{id}/exports/{format}.tar"));
+
+        let (status, headers, archive) = fetch(&app, "GET", url).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CONTENT_TYPE], "application/x-tar");
+        assert_eq!(link["size"], archive.len());
+        let names = tar::Archive::new(archive.as_slice())
+            .entries()
+            .unwrap()
+            .map(|entry| entry.unwrap().path().unwrap().display().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(names, expected);
+    }
+
+    let (status, _, _) = fetch(&app, "GET", &format!("/api/v1/jobs/{id}/exports/other.tar")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn cors_is_off_by_default_and_allows_configured_origins() {
+    let root = tempfile::tempdir().unwrap();
+    let preflight = |app: Router| async move {
+        let request = Request::builder()
+            .method("OPTIONS")
+            .uri("/api/v1/jobs")
+            .header(header::ORIGIN, "https://studio.example")
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+            .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "authorization")
+            .body(Body::empty())
+            .unwrap();
+        app.oneshot(request).await.unwrap()
+    };
+
+    let closed = preflight(app(root.path(), None).await).await;
+    assert!(
+        !closed
+            .headers()
+            .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+    );
+
+    let open =
+        preflight(app_with(root.path(), Some("secret"), Some("https://studio.example")).await)
+            .await;
+    assert_eq!(open.status(), StatusCode::OK);
+    assert_eq!(
+        open.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+        "https://studio.example"
+    );
+}
+
+#[tokio::test]
+async fn optimizing_an_asset_writes_a_sibling_glb_to_the_library() {
+    let root = tempfile::tempdir().unwrap();
+    let app = app(root.path(), None).await;
+    let cube = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/assets/cube.stl"),
+    )
+    .unwrap();
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/api/v1/assets/parts/cube.stl",
+        Body::from(cube),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let optimize = |body: serde_json::Value| Body::from(body.to_string());
+
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/api/v1/asset-optimizations",
+        optimize(serde_json::json!({ "path": "parts/cube.stl" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("source_unit_scale_m")
+    );
+
+    let (status, report) = send(
+        &app,
+        "POST",
+        "/api/v1/asset-optimizations",
+        optimize(serde_json::json!({ "path": "parts/cube.stl", "source_unit_scale_m": 0.001 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{report}");
+    assert_eq!(report["path"], "parts/cube.optimized.glb");
+    assert_eq!(report["source_triangles"], 12);
+    assert_eq!(report["triangles"], 12);
+    assert_eq!(report["vertices"], 24);
+    assert!(report["max_deviation_mm"].as_f64().unwrap() <= 0.1);
+
+    let (_, assets) = send(&app, "GET", "/api/v1/assets", Body::empty()).await;
+    let paths: Vec<&str> = assets
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|asset| asset["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["parts/cube.optimized.glb", "parts/cube.stl"]);
+    assert_eq!(assets[0]["size"], report["bytes"]);
+
+    for (path, expected) in [
+        ("parts/cube.optimized.glb", StatusCode::BAD_REQUEST),
+        ("parts/missing.glb", StatusCode::NOT_FOUND),
+        ("../escape.glb", StatusCode::BAD_REQUEST),
+    ] {
+        let (status, _) = send(
+            &app,
+            "POST",
+            "/api/v1/asset-optimizations",
+            optimize(serde_json::json!({ "path": path })),
+        )
+        .await;
+        assert_eq!(status, expected, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn environment_maps_are_library_assets() {
+    let root = tempfile::tempdir().unwrap();
+    let app = app(root.path(), None).await;
+    let with_environment = |path: &str| {
+        let config = CONFIG.replace(
+            "material_defaults =",
+            &format!("environment = {{ path = \"{path}\" }}\nmaterial_defaults ="),
+        );
+        Body::from(serde_json::json!({ "config": config }).to_string())
+    };
+    let (status, report) = send(
+        &app,
+        "POST",
+        "/api/v1/configs/validate",
+        with_environment("skies/studio.hdr"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!(
+        report["missing_assets"],
+        serde_json::json!(["cup/cup.glb", "nippel/nippel.glb", "skies/studio.hdr"])
+    );
+
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/api/v1/configs/validate",
+        with_environment("../outside.hdr"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}

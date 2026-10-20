@@ -7,10 +7,15 @@ dataset/
 ├── run.json               manifest: config fingerprint, asset catalog, backend, scene count
 ├── resolved-config.toml   the exact configuration bytes of this run
 ├── environment.json       generator version, OS, architecture, profile, features
+├── assets/
+│   └── <asset-id>/        asset ID, with unsafe bytes percent-encoded
+│       ├── asset.json     asset ID, content fingerprint, mesh checksum and counts
+│       └── model.ply      the canonical visual mesh, model-frame metres
 ├── .staging/              in-progress scenes; never part of the dataset
 └── scenes/
     └── 00000000000000000000/      scene ID, 20 digits
         ├── scene.json             the scene snapshot
+        ├── materials.json         the surface each object was rendered with
         ├── checksums.json         BLAKE3 of every file below
         └── frames/
             └── 00001/             camera ID, 5 digits
@@ -20,7 +25,14 @@ dataset/
                 └── instance.png   16-bit visible instance IDs, 0 = background
 ```
 
-A snapshot corpus written by `bpp simulate` has the same shape with
+The `assets/` models are the exact meshes the scenes were rendered with, so
+exporters such as [BOP export](bop.md) never need the original source files.
+They are written once when a run starts. A resumed run must present
+byte-identical models, which the asset catalog fingerprint in `run.json`
+already guarantees. Datasets written before model storage existed cannot be
+exported; regenerate them.
+
+A snapshot corpus written by `bop-gen simulate` has the same shape with
 `corpus.json` as its manifest and only `scene.json` in each scene directory.
 
 ## Atomic commit
@@ -34,7 +46,7 @@ whole scene or none of it.
 ## Group commit
 
 Making data durable means flushing the storage device's cache, which is slow
-(about 4 ms on macOS) and serialized by the device. `bpp-dataset` therefore
+(about 4 ms on macOS) and serialized by the device. `bop-dataset` therefore
 makes many files durable with one flush:
 
 1. Hand every staged file and directory to the device without the expensive
@@ -61,5 +73,5 @@ exactly: resolved configuration, asset catalog, renderer provenance, and scene
 count. Committed scenes are found by scanning `scenes/`; everything else is
 pending. Leftover staging directories are ignored.
 
-`bpp validate DATASET` re-reads every committed scene, decodes its frames,
+`bop-gen validate DATASET` re-reads every committed scene, decodes its frames,
 and verifies all checksums. It exits with code 5 on any mismatch.

@@ -1,10 +1,10 @@
 [project]
-name = "bpp-blenderproc-worker"
+name = "bop-blenderproc-worker"
 version = "0.1.0"
 requires-python = ">=3.11,<3.12"
 license = "GPL-3.0-or-later"
 dependencies = [
-    "blenderproc==2.7.0",
+    "blenderproc==2.8.0",
     "numpy>=1.24,<3",
 ]
 

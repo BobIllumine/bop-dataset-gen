@@ -1,0 +1,42 @@
+[package]
+name = "bop-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "bop-gen"
+path = "src/main.rs"
+
+[features]
+default = ["fast", "wgpu"]
+fast = ["bop-pipeline/fast", "bop-run/fast"]
+reproducible = ["bop-pipeline/reproducible", "bop-run/reproducible"]
+wgpu = ["dep:bop-render-wgpu", "bop-run/wgpu"]
+blenderproc = ["dep:bop-render-blenderproc", "bop-run/blenderproc"]
+
+[lints]
+workspace = true
+
+[dependencies]
+bop-pipeline = { path = "../bop-pipeline", default-features = false }
+bop-assets = { path = "../bop-assets" }
+bop-dataset = { path = "../bop-dataset" }
+bop-core = { path = "../bop-core", features = ["schema"] }
+bop-render-api = { path = "../bop-render-api" }
+bop-run = { path = "../bop-run", default-features = false }
+bop-render-wgpu = { path = "../bop-render-wgpu", optional = true }
+bop-render-blenderproc = { path = "../bop-render-blenderproc", optional = true }
+ctrlc = { version = "=3.5.2", features = ["termination"] }
+serde_json = { version = "1" }
+toml = "1.1.4"
+tracing = "=0.1.41"
+tracing-subscriber = { version = "=0.3.20", default-features = false, features = ["env-filter", "fmt", "json", "std"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "=0.31.3", default-features = false, features = ["resource"] }
+
+[dev-dependencies]
+tempfile = "3"

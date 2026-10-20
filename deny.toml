@@ -11,6 +11,8 @@ allow = [
     "Apache-2.0",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    # Mozilla's CA root list (webpki-roots), used for TLS to S3 and PostgreSQL.
+    "CDLA-Permissive-2.0",
     "GPL-3.0-or-later",
     "ISC",
     "MIT",

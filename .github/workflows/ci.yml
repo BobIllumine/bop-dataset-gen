@@ -37,9 +37,9 @@ jobs:
         name: [fast, reproducible]
         include:
           - name: fast
-            args: --workspace --all-targets --features bpp-cli/blenderproc
+            args: --workspace --all-targets --features bop-cli/blenderproc
           - name: reproducible
-            args: -p bpp-cli -p bpp-pipeline -p bpp-physics-rapier --all-targets --no-default-features --features bpp-cli/reproducible,bpp-cli/wgpu,bpp-cli/blenderproc,bpp-pipeline/reproducible,bpp-physics-rapier/reproducible
+            args: -p bop-cli -p bop-pipeline -p bop-physics-rapier --all-targets --no-default-features --features bop-cli/reproducible,bop-cli/wgpu,bop-cli/blenderproc,bop-pipeline/reproducible,bop-physics-rapier/reproducible
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
@@ -60,7 +60,7 @@ jobs:
           - name: fast
             args: --workspace
           - name: reproducible
-            args: -p bpp-cli -p bpp-pipeline -p bpp-physics-rapier --no-default-features --features bpp-cli/reproducible,bpp-cli/wgpu,bpp-cli/blenderproc,bpp-pipeline/reproducible,bpp-physics-rapier/reproducible
+            args: -p bop-cli -p bop-pipeline -p bop-physics-rapier --no-default-features --features bop-cli/reproducible,bop-cli/wgpu,bop-cli/blenderproc,bop-pipeline/reproducible,bop-physics-rapier/reproducible
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
@@ -147,10 +147,54 @@ jobs:
       - run: uvx ruff@0.12.0 check .
       - run: uv run --no-project --python 3.11 python -m py_compile blenderproc_worker.py
 
+  server:
+    name: Job server (PostgreSQL, MinIO, lavapipe)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: bop
+          POSTGRES_PASSWORD: bop
+          POSTGRES_DB: bop
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U bop -d bop"
+          --health-interval 5s --health-retries 20
+    env:
+      BOP_TEST_DATABASE_URL: postgres://bop:bop@127.0.0.1:5432/bop
+      BOP_TEST_STORAGE_URL: s3://bop/ci
+      AWS_ENDPOINT_URL: http://127.0.0.1:9000
+      AWS_ALLOW_HTTP: "true"
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: bop
+      AWS_SECRET_ACCESS_KEY: bop-minio-secret
+    steps:
+      - uses: actions/checkout@v4
+      # Service containers cannot take a command, and MinIO needs `server`.
+      - name: Start MinIO and create the bucket
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER="$AWS_ACCESS_KEY_ID" -e MINIO_ROOT_PASSWORD="$AWS_SECRET_ACCESS_KEY" \
+            pgsty/minio:RELEASE.2026-08-04T00-00-00Z server /data
+          for _ in $(seq 60); do curl -fs http://127.0.0.1:9000/minio/health/live && break; sleep 1; done
+          aws --endpoint-url "$AWS_ENDPOINT_URL" s3 mb s3://bop
+      - name: Install the lavapipe software Vulkan driver
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: server
+      - name: Require a wgpu adapter
+        run: cargo run --locked -p bop-cli -- doctor --renderer wgpu
+      - run: cargo test --locked -p bop-server --test end_to_end -- --ignored
+
   ci-ok:
     name: CI passed
     if: always()
-    needs: [fmt, clippy, test, docs, schema, book, deny, coverage, worker]
+    needs: [fmt, clippy, test, docs, schema, book, deny, coverage, worker, server]
     runs-on: ubuntu-latest
     steps:
       - name: Require every job to succeed

@@ -24,7 +24,8 @@ Parallel runs have two stages joined by a bounded channel:
   snapshots exist at once. No lock is held while blocking.
 - **Cancellation.** Workers check the cancellation token before claiming a
   scene and again before simulating it. A scene already being simulated
-  finishes.
+  finishes. The CLI cancels the token on the first Ctrl-C or SIGTERM; see
+  [Command line](cli.md#interrupting-a-run).
 - **Failure.** The first fatal error wins. A simulator error, a worker panic
   (caught at the task boundary), or a dropped receiver cancels the token so
   the rest of the pipeline stops, and every worker is joined before `run`
