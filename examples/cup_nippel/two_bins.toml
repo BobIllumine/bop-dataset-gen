@@ -1,0 +1,120 @@
+# Two cardboard boxes side by side: the left one holds cups, the right one
+# nippels, and about 5% of the parts in each box are the other kind (16 parts
+# per box, so roughly 44% of boxes have no stray part).
+# 400 scenes, one camera 2.0 m straight above the gap between the boxes at 640x480.
+# Box sizes and spacing are placeholders; set them to the real cell.
+# Relative paths resolve against this file's directory.
+[run]
+master_seed = 1
+valid_scene_count = 400
+scene_attempt_limit = 8
+placement_attempt_limit_per_object = 256
+simulation_workers = 8
+renderer_workers = 4
+queue_capacity = 32
+output_path = "output"
+cache_path = "../../target/bop-cache"
+
+[[assets]]
+id = "cup"
+# cup.glb: cup/meshes/cup.stl in metres, bounding box centred, black matte plastic.
+source_path = "cup/cup.glb"
+source_unit_scale_m = 1.0
+model_transform = { translation = [0.0, 0.0, 0.0], rotation_xyzw = [0.0, 0.0, 0.0, 1.0] }
+mixture_weight = 1.0
+# Mesh volume 302.7 cm3 at PVC density 1.40 g/cm3 (the URDF mass assumes steel).
+physical_properties = { mass_kg = { kind = "fixed", value = 0.424 }, friction = { kind = "uniform", min = 0.3, max = 0.5 }, restitution = { kind = "fixed", value = 0.1 } }
+vhacd = { resolution = 50000, max_convex_hulls = 16, concavity = 0.0025, plane_downsampling = 4, convex_hull_downsampling = 4 }
+
+[[assets]]
+id = "nippel"
+# nippel.glb: nippel/meshes/nippel.stl in metres, bounding box centred, black matte plastic.
+source_path = "nippel/nippel.glb"
+source_unit_scale_m = 1.0
+model_transform = { translation = [0.0, 0.0, 0.0], rotation_xyzw = [0.0, 0.0, 0.0, 1.0] }
+mixture_weight = 1.0
+# Mesh volume 144.1 cm3 at PVC density 1.40 g/cm3 (the URDF mass is not physical).
+physical_properties = { mass_kg = { kind = "fixed", value = 0.202 }, friction = { kind = "uniform", min = 0.3, max = 0.5 }, restitution = { kind = "fixed", value = 0.1 } }
+vhacd = { resolution = 50000, max_convex_hulls = 16, concavity = 0.0025, plane_downsampling = 4, convex_hull_downsampling = 4 }
+
+# Outer boxes are 0.81 m wide in X; centres 0.43 m either side leave a 5 cm gap.
+[[bins]]
+id = "left"
+inner_dimensions_m = [0.8, 0.6, 0.5]
+floor_thickness_m = 0.005
+wall_thickness_m = 0.005
+world_from_bin = { translation = [-0.43, 0.0, 0.0], rotation_xyzw = [0.0, 0.0, 0.0, 1.0] }
+material_label = "cardboard"
+physical_properties = { friction = 0.5, restitution = 0.1 }
+render_material = { base_color_srgb = [0.65, 0.5, 0.35, 1.0], metallic = 0.0, roughness = 0.95 }
+
+[bins.population]
+object_count = { kind = "fixed", value = 16 }
+asset_mixture = { kind = "choice", values = [{ value = "cup", weight = 0.95 }, { value = "nippel", weight = 0.05 }] }
+spawn_volume = { min_m = [-0.33, -0.23, 0.08], max_m = [0.33, 0.23, 0.48] }
+
+[[bins]]
+id = "right"
+inner_dimensions_m = [0.8, 0.6, 0.5]
+floor_thickness_m = 0.005
+wall_thickness_m = 0.005
+world_from_bin = { translation = [0.43, 0.0, 0.0], rotation_xyzw = [0.0, 0.0, 0.0, 1.0] }
+material_label = "cardboard"
+physical_properties = { friction = 0.5, restitution = 0.1 }
+render_material = { base_color_srgb = [0.65, 0.5, 0.35, 1.0], metallic = 0.0, roughness = 0.95 }
+
+[bins.population]
+object_count = { kind = "fixed", value = 16 }
+asset_mixture = { kind = "choice", values = [{ value = "cup", weight = 0.05 }, { value = "nippel", weight = 0.95 }] }
+spawn_volume = { min_m = [-0.33, -0.23, 0.08], max_m = [0.33, 0.23, 0.48] }
+
+[physics]
+fixed_timestep_s = 0.004166667
+substeps = 2
+solver_iterations = 8
+min_steps = 32
+max_steps = 2400
+stability_check_interval = 8
+linear_sleep_threshold_mps = 0.02
+angular_sleep_threshold_rad_s = 0.05
+required_stable_checks = 3
+escape_margin_m = 0.002
+maximum_penetration_m = 0.01
+
+[[cameras]]
+id = 1
+image_size = { width = 640, height = 480 }
+near_m = 0.05
+far_m = 3.0
+projection = { vertical_fov_deg = 50.0 }
+# Both box rims must be in view: at 2.0 m the 50° x 63.7° view covers the
+# rims (0.5 m up, 0.835 m out). Looking straight down (see "Camera poses" in docs/book/configuration.md); image up is world +Y.
+pose = { fixed_world_from_camera = { translation = [0.0, 0.0, 2.0], rotation_xyzw = [-0.70710678, 0.0, 0.0, 0.70710678] } }
+
+[appearance]
+background_srgb = [0.05, 0.05, 0.06, 1.0]
+ambient = { color = [1.0, 1.0, 1.0], intensity = 0.2 }
+directional_lights = [
+  { direction_world = [0.3, 0.2, -1.0], color = [1.0, 0.97, 0.92], illuminance_lux = 1000.0 },
+]
+point_lights = []
+material_defaults = { base_color_srgb = [0.7, 0.7, 0.72, 1.0], metallic = { kind = "uniform", min = 0.0, max = 0.6 }, roughness = { kind = "uniform", min = 0.3, max = 0.8 } }
+
+[renderers.wgpu]
+device_preference = "automatic"
+adapter_preference = "high_performance"
+shadow_map_size = 2048
+rgb_fxaa = true
+
+[renderers.blenderproc]
+executable_path = "../../tools/blenderproc-worker/.venv/bin/blenderproc"
+worker_path = "../../tools/blenderproc-worker/blenderproc_worker.py"
+device_selection = "GPU"
+handshake_timeout_s = 120.0
+request_timeout_s = 600.0
+stderr_tail_capacity = 256
+
+[output]
+rgb = true
+depth = true
+visible_instances = true

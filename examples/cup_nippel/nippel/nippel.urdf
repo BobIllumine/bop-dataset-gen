@@ -1,0 +1,30 @@
+<?xml version="1.0" ?>
+<robot name="nippel">
+
+<material name="silver">
+  <color rgba="0.700 0.700 0.700 1.000"/>
+</material>
+
+<link name="base_link">
+  <inertial>
+    <origin xyz="0.15260861686713093 0.0019854905325235026 0.0015721676344746644" rpy="0 0 0"/>
+    <mass value="3.4355336580872704"/>
+    <inertia ixx="0.0063135971222201956" iyy="0.004423480284609482" izz="0.004486509420376747" ixy="-5.9294023818058737e-05" iyz="-0.00011695307743309739" ixz="-5.3141380177444686e-05"/>
+  </inertial>
+  <visual>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="meshes/nippel.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+    <material/>
+  </visual>
+  <collision>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="meshes/nippel.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+</robot>

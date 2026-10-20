@@ -18,7 +18,10 @@ fn protocol_messages_are_versioned_and_strict() {
     let pinned = WorkerMessage::hello_for_worker("AUTO", BlenderProcSampling::DEFAULT, 1, 2);
     let wire = serde_json::to_string(&pinned).unwrap();
     assert!(wire.contains(r#""worker_index":1,"worker_count":2"#));
-    assert_eq!(serde_json::from_str::<WorkerMessage>(&wire).unwrap(), pinned);
+    assert_eq!(
+        serde_json::from_str::<WorkerMessage>(&wire).unwrap(),
+        pinned
+    );
 
     let ready: WorkerReply = serde_json::from_str(
         r#"{"protocol_version":1,"type":"ready","implementation_version":"2.0","device_name":"CPU"}"#,
