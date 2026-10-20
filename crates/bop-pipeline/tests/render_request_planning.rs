@@ -56,9 +56,18 @@ fn shell_camera_replays_exactly_and_changes_with_scene_identity() {
         .plan(serde_json::from_value(other_json).unwrap())
         .unwrap();
 
+    // The focal length comes from `tan`, whose last bit differs between the
+    // system math libraries (macOS and glibc); see determinism.md.
+    let focal = if cfg!(target_os = "macos") {
+        "10.392305"
+    } else {
+        "10.392304"
+    };
     assert_eq!(
         serde_json::to_string(&first.cameras()[0]).unwrap(),
-        r#"{"schema_version":1,"camera_id":1,"image_size":{"width":16,"height":12},"k":[10.392305,0.0,8.0,0.0,10.392305,6.0,0.0,0.0,1.0],"camera_from_world":{"camera_from_world":{"translation":[-8.940696e-8,0.115130655,1.1363792],"rotation_xyzw":[0.74736434,-0.59185594,0.18743753,0.23668616]}},"near_m":0.01,"far_m":10.0}"#
+        format!(
+            r#"{{"schema_version":1,"camera_id":1,"image_size":{{"width":16,"height":12}},"k":[{focal},0.0,8.0,0.0,{focal},6.0,0.0,0.0,1.0],"camera_from_world":{{"camera_from_world":{{"translation":[-8.940696e-8,0.115130655,1.1363792],"rotation_xyzw":[0.74736434,-0.59185594,0.18743753,0.23668616]}}}},"near_m":0.01,"far_m":10.0}}"#
+        )
     );
     assert_eq!(first.cameras(), replay.cameras());
     assert_ne!(first.cameras(), other.cameras());

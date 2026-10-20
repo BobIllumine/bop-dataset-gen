@@ -539,6 +539,26 @@ struct Worker {
     diagnostic_capacity: usize,
 }
 
+/// Starts `command`, retrying briefly while its executable is busy.
+///
+/// On Linux, a file that was just written can stay open in a child another
+/// thread forked meanwhile, until that child execs; executing it fails with
+/// `ETXTBSY` in that window.
+fn spawn_retrying_busy(command: &mut Command) -> std::io::Result<Child> {
+    let mut attempts: u32 = 0;
+    loop {
+        match command.spawn() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 10 =>
+            {
+                attempts += 1;
+                thread::sleep(Duration::from_millis(10 * u64::from(attempts)));
+            }
+            result => return result,
+        }
+    }
+}
+
 impl Worker {
     fn spawn(config: &BlenderProcRendererConfig) -> Result<Self, BlenderProcInitializationError> {
         let mut command = Command::new(config.executable_path());
@@ -555,9 +575,8 @@ impl Worker {
         // the worker still exits when its stdin closes.
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
-        let mut child = command
-            .spawn()
-            .map_err(BlenderProcInitializationError::Spawn)?;
+        let mut child =
+            spawn_retrying_busy(&mut command).map_err(BlenderProcInitializationError::Spawn)?;
         let stdin = child
             .stdin
             .take()

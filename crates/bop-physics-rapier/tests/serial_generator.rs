@@ -321,6 +321,10 @@ fn eight_scene_primitive_corpus_is_locked_serializable_and_schedule_independent(
         "aarch64-macos-reproducible" => {
             "db281b77f46d9bb8e2806cf67e865547419dc964d6ecc0e299a8a793849197d5"
         }
+        "x86_64-linux-fast" => "a3ebf2b89510d039b9311424875ee1eb942cd4e96d1ab33538eb708e5f6a493e",
+        "x86_64-linux-reproducible" => {
+            "9953d0fdf5f23e16897a7d4929d5257b21ddf93f7651668a0de1e939d9c22198"
+        }
         _ => panic!("no corpus digest is pinned for {platform}; this platform produced {digest}"),
     };
     assert_eq!(digest, expected, "corpus digest for {platform}");
