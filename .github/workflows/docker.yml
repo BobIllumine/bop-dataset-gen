@@ -54,7 +54,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PUSH: ${{ github.event_name != 'pull_request' }}
-      IMAGE: ${{ vars.DOCKERHUB_IMAGE || format('{0}/bop-server', vars.DOCKERHUB_USERNAME) }}
+      # Builds that only check the image need no Docker Hub name; pushes are
+      # stopped below when it is missing.
+      IMAGE: ${{ vars.DOCKERHUB_IMAGE || (vars.DOCKERHUB_USERNAME && format('{0}/bop-server', vars.DOCKERHUB_USERNAME)) || 'bop-server' }}
     steps:
       - uses: actions/checkout@v4
         with:

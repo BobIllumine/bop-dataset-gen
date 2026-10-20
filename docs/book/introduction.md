@@ -7,8 +7,9 @@ instance masks, and exact object poses.
 
 Two properties drive most of the design:
 
-- **Reproducible.** The same configuration produces byte-identical output, no
-  matter how many workers run or in which order scenes finish.
+- **Reproducible.** The same configuration produces byte-identical output on
+  the same platform, no matter how many workers run or in which order scenes
+  finish.
 - **Crash-safe.** A run can be interrupted at any point and resumed. A scene is
   either completely published or absent; it is never half written.
 

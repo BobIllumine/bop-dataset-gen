@@ -20,6 +20,9 @@ exactly the dataset the command line would.
 | With the web UI | Add `--profile studio`. Builds bop-studio from `../bop-studio` and serves it on `127.0.0.1:3000`. |
 | With authentik in containers | Add `-f deploy/authentik.yaml`; see [Authentication](#authentication). |
 
+For a step-by-step production setup (GPU host, existing authentik, external
+PostgreSQL and S3, Tailscale Funnel), see [Deploying](deployment.md).
+
 The container needs credentials (`BOP_API_TOKEN` and/or `BOP_OIDC_*`) or an
 explicit `BOP_ALLOW_ANONYMOUS=true`. Compose publishes every port on
 `127.0.0.1` only; serve other machines through a TLS reverse proxy.

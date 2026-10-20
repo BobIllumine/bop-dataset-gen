@@ -1,6 +1,6 @@
 name: Release
 
-# Push a tag like v0.1.0 (matching the workspace version) to build and publish
+# Push a tag like v0.1.1 (matching the workspace version) to build and publish
 # the `bop-gen` binaries. Tags with a suffix, such as v0.2.0-rc.1, publish a
 # prerelease.
 

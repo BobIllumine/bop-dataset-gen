@@ -7,7 +7,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use bop_assets::ConvexPart;
@@ -212,17 +212,27 @@ fn a_slow_consumer_bounds_in_flight_snapshots() {
         let physics =
             scope.spawn(|| executor.run_scenes(&ids, &factory, sender, &CancellationToken::new()));
         // Nobody reads yet: each worker can fill the queue and then hold one
-        // more snapshot while blocked in `send`.
-        thread::sleep(Duration::from_millis(200));
+        // more snapshot while blocked in `send`. Wait for the queue to fill,
+        // however slow the machine, then give the workers time to overrun it.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while receiver.len() < capacity && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        thread::sleep(Duration::from_millis(100));
+        let queued = receiver.len();
         let simulated = factory.counters.simulated.load(Ordering::SeqCst);
+
+        // Drain before asserting: a failed assertion inside the scope would
+        // otherwise wait forever for workers blocked in `send`.
+        let received = receiver.iter().count();
+        let accepted = physics.join().unwrap().unwrap().accepted_scene_count();
         assert!(
             simulated <= capacity + workers,
             "{simulated} scenes simulated with nobody consuming"
         );
-        assert_eq!(receiver.len(), capacity);
-
-        assert_eq!(receiver.iter().count(), 40);
-        assert_eq!(physics.join().unwrap().unwrap().accepted_scene_count(), 40);
+        assert_eq!(queued, capacity);
+        assert_eq!(received, 40);
+        assert_eq!(accepted, 40);
     });
 }
 

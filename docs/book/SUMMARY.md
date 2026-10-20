@@ -13,4 +13,5 @@
   - [Results: wgpu and BlenderProc](benchmark-results.md)
 - [Command line](cli.md)
 - [Job server](server.md)
+  - [Deploying](deployment.md)
 - [Development and CI](development.md)

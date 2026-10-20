@@ -492,8 +492,11 @@ fn json_round_trip_allows_one_ulp_of_canonical_renormalization() {
 
 #[test]
 fn cancellation_regression_uses_intermediate_not_final_output_scale() {
-    let rotation = [0.1, -0.7, 0.3, 0.2];
-    let point = [32.0, -32.0, 31.875];
+    // glam's aarch64 NEON path rounds differently from its SSE2 and scalar
+    // paths, so the fixture must exceed the old tolerance under both; this one
+    // does by 2.75x (NEON) and 3x (SSE2, scalar).
+    let rotation = [0.3, -0.5, 0.6, 0.2];
+    let point = [31.875, -64.0, 63.875];
     let right = RigidTransform::try_new([0.0; 3], rotation).unwrap();
     let right_output = right.transform_point(metres(point)).unwrap();
     let left_rotation_only = RigidTransform::try_new([0.0; 3], rotation).unwrap();

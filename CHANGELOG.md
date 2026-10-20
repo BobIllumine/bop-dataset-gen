@@ -4,6 +4,32 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## 0.1.1
+
+### Changed
+
+- **Determinism is per platform.** Datasets are byte-identical on the same
+  platform (CPU architecture and operating system), in both the `fast` and
+  `reproducible` builds; physics results differ in their last bits between,
+  for example, x86_64 Linux and arm64 macOS. The guide no longer claims
+  `reproducible` is cross-platform, and the corpus digest test pins each CI
+  platform.
+
+### Added
+
+- **Deployment guide.** `docs/book/deployment.md` covers a GPU host with an
+  existing authentik, external PostgreSQL and S3, and Tailscale Funnel.
+- **Compose settings.** `BOP_SERVER_IMAGE` and `BOP_STUDIO_IMAGE` pull
+  published images instead of building; `BOP_CONNECT_SRC` sets the studio's
+  allowed API and sign-in origins.
+
+### Fixed
+
+- Tests that failed on x86_64: a transform-precision fixture that only held
+  with glam's aarch64 NEON arithmetic, and the corpus digest.
+- A physics-queue test that hung, instead of failing, on a slow machine.
+- The Docker workflow's image name on builds without Docker Hub settings.
+
 ## 0.1.0
 
 First release.

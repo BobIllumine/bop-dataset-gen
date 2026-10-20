@@ -274,7 +274,7 @@ dependencies = [
 
 [[package]]
 name = "bop-assets"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "bop-core",
@@ -291,7 +291,7 @@ dependencies = [
 
 [[package]]
 name = "bop-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bop-assets",
  "bop-core",
@@ -312,7 +312,7 @@ dependencies = [
 
 [[package]]
 name = "bop-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "glam 0.30.10",
@@ -327,7 +327,7 @@ dependencies = [
 
 [[package]]
 name = "bop-dataset"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "bop-core",
@@ -342,7 +342,7 @@ dependencies = [
 
 [[package]]
 name = "bop-physics-rapier"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "bop-assets",
@@ -354,7 +354,7 @@ dependencies = [
 
 [[package]]
 name = "bop-pipeline"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "bop-assets",
@@ -375,7 +375,7 @@ dependencies = [
 
 [[package]]
 name = "bop-render-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bop-assets",
  "bop-core",
@@ -384,7 +384,7 @@ dependencies = [
 
 [[package]]
 name = "bop-render-blenderproc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "bop-assets",
@@ -402,7 +402,7 @@ dependencies = [
 
 [[package]]
 name = "bop-render-wgpu"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "bop-assets",
@@ -421,7 +421,7 @@ dependencies = [
 
 [[package]]
 name = "bop-run"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bop-core",
  "bop-pipeline",
@@ -433,7 +433,7 @@ dependencies = [
 
 [[package]]
 name = "bop-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "bop-core",
@@ -4840,7 +4840,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bop-core",
 ]

@@ -47,6 +47,11 @@ services:
       authentik-server:
         condition: service_started
 
+  bop-studio:
+    environment:
+      # The browser calls authentik's token endpoint; let the studio's CSP allow it.
+      BOP_CONNECT_SRC: "https: ${AUTHENTIK_URL:-http://localhost:9000}"
+
   authentik-server:
     <<: *authentik
     command: server
