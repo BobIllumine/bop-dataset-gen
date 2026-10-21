@@ -206,6 +206,52 @@ print('BOP1\t{not-json', flush=True)
     }
 
     #[test]
+    fn dropping_the_renderer_stops_processes_the_launcher_started() {
+        // Like `blenderproc run`, the launcher runs Blender as its own child.
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("launcher.py");
+        let pid_file = temp.path().join("blender.pid");
+        fs::write(
+            &executable,
+            format!(
+                r"#!/usr/bin/env python3
+import json, pathlib, subprocess, sys
+blender=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],stdin=subprocess.DEVNULL)
+pathlib.Path({pid_file:?}).write_text(str(blender.pid))
+for line in sys.stdin:
+ m=json.loads(line)
+ if m['type']=='hello': print('BOP1\t'+json.dumps({{'protocol_version':1,'type':'ready','implementation_version':'fake-1','device_name':'CPU'}}),flush=True)
+"
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+        let config =
+            BlenderProcRendererConfig::try_new(&executable, "unused.py", "CPU", 5.0, 5.0, 4096)
+                .unwrap();
+
+        let renderer = BlenderProcRenderer::try_new(config).unwrap();
+        let pid = fs::read_to_string(&pid_file).unwrap();
+        drop(renderer);
+
+        let alive = || {
+            std::process::Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while alive() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(!alive(), "process {} outlived the renderer", pid.trim());
+    }
+
+    #[test]
     #[ignore = "requires the pinned BlenderProc and Blender runtime"]
     fn real_worker_renders_and_validates_the_canonical_three_channels() {
         let executable =

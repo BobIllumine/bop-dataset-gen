@@ -11,6 +11,15 @@ All notable changes to this project are documented here. The format follows
 - **GitHub Packages.** The server image is also published as
   `ghcr.io/bobillumine/bop-server`, and Docker Hub is optional. A manual run
   with a `tag` publishes an existing release again.
+- **Port settings.** `deploy/.env.example` documents `BOP_PORT` and
+  `BOP_STUDIO_PORT` for hosts where 8080 or 3000 is taken.
+
+### Fixed
+
+- **Blender outlived failed jobs.** Stopping a BlenderProc renderer killed
+  only the `blenderproc` launcher, leaving its Blender process running and
+  holding GPU memory. The renderer now kills the worker's whole process
+  group, and the compose server runs under an init that reaps leftovers.
 
 ## 0.1.1
 
