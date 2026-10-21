@@ -39,17 +39,18 @@ pub async fn build(settings: settings::Settings) -> Result<(axum::Router, runner
         .await
         .map_err(|error| format!("asset index: {error}"))?;
     tracing::info!(assets, "indexed the asset library");
-    if settings.requeue_on_start {
-        let requeued = jobs
-            .requeue_interrupted()
-            .await
-            .map_err(|error| format!("database: {error}"))?;
-        if requeued > 0 {
-            tracing::info!(
-                jobs = requeued,
-                "queued jobs interrupted by the last shutdown"
-            );
-        }
+    // Jobs whose server stopped renewing their lease, and with
+    // BOP_REQUEUE_ON_START the ones this server's last process left running.
+    let released = jobs
+        .release_interrupted(
+            settings
+                .requeue_on_start
+                .then_some(settings.runner_id.as_str()),
+        )
+        .await
+        .map_err(|error| format!("database: {error}"))?;
+    if !released.is_empty() {
+        tracing::info!(jobs = released.len(), "released interrupted jobs");
     }
     let auth = auth::Authenticator::new(&settings)?;
     if let Some(oidc) = &settings.oidc {

@@ -4,6 +4,7 @@
 use std::{
     collections::HashSet,
     str::FromStr,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -97,7 +98,7 @@ pub struct Job {
     /// When the job last reached a terminal state.
     pub finished_at_ms: Option<i64>,
     /// A cancel was requested while the job is running; it stops once its
-    /// in-flight scenes commit. Not stored: only the running server knows.
+    /// in-flight scenes commit.
     pub cancel_requested: bool,
 }
 
@@ -115,7 +116,7 @@ impl Job {
             updated_at_ms: row.try_get("updated_at_ms")?,
             started_at_ms: row.try_get("started_at_ms")?,
             finished_at_ms: row.try_get("finished_at_ms")?,
-            cancel_requested: false,
+            cancel_requested: row.try_get::<i64, _>("cancel_requested")? != 0,
         })
     }
 }
@@ -135,7 +136,7 @@ pub struct NewJob<'a> {
 }
 
 const JOB_COLUMNS: &str = "id, state, renderer, export_bop, total_scenes, committed_scenes, error, \
-     created_at_ms, updated_at_ms, started_at_ms, finished_at_ms";
+     created_at_ms, updated_at_ms, started_at_ms, finished_at_ms, cancel_requested";
 
 /// Rows per multi-row statement, within every supported bind-parameter limit.
 const BATCH_ROWS: usize = 250;
@@ -170,17 +171,26 @@ pub struct AssetRecord {
     pub etag: Option<String>,
 }
 
+/// `PostgreSQL` channel announcing job changes. The payload is
+/// `<origin> <job id>`, where `origin` names the store that made the change.
+pub const JOB_CHANNEL: &str = "bop_jobs";
+
 /// Job persistence and the storage index, shared by the API and the runner.
 #[derive(Clone)]
 pub struct JobStore {
     pool: AnyPool,
+    /// Whether changes are announced on [`JOB_CHANNEL`].
+    notifies: bool,
+    /// Tags this process's announcements, so its listener can skip them.
+    origin: Arc<str>,
 }
 
 impl JobStore {
     /// Connects and applies pending migrations.
     ///
     /// `sqlite://` and `postgres://` URLs are accepted. A `SQLite` URL should
-    /// carry `?mode=rwc` to create the file on first start.
+    /// carry `?mode=rwc` to create the file on first start. On `PostgreSQL`,
+    /// every job change is announced on [`JOB_CHANNEL`].
     ///
     /// # Errors
     ///
@@ -194,7 +204,33 @@ impl JobStore {
             .connect(url)
             .await?;
         migrator().run(&pool).await?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            notifies: url.starts_with("postgres:") || url.starts_with("postgresql:"),
+            origin: uuid::Uuid::new_v4().to_string().into(),
+        })
+    }
+
+    /// Tag of this store's announcements on [`JOB_CHANNEL`].
+    #[must_use]
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+
+    /// Announces a change to job `id` to other servers. A failure only delays
+    /// them until their next check, so it is logged, not returned.
+    async fn announce(&self, id: &str) {
+        if !self.notifies {
+            return;
+        }
+        if let Err(error) = sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(JOB_CHANNEL)
+            .bind(format!("{} {id}", self.origin))
+            .execute(&self.pool)
+            .await
+        {
+            tracing::warn!(job = id, "cannot announce a job change: {error}");
+        }
     }
 
     /// Inserts a queued job.
@@ -218,6 +254,7 @@ impl JobStore {
         .bind(now)
         .execute(&self.pool)
         .await?;
+        self.announce(job.id).await;
         self.get(job.id).await?.ok_or(sqlx::Error::RowNotFound)
     }
 
@@ -267,7 +304,8 @@ impl JobStore {
         .collect()
     }
 
-    /// Moves the oldest queued job to running and returns it with its configuration.
+    /// Moves the oldest queued job to running under `runner_id`, leased for
+    /// `lease_ms`, and returns it with its configuration.
     ///
     /// The conditional update makes the claim safe when several servers share
     /// one database: only one of them sees a changed row.
@@ -275,7 +313,11 @@ impl JobStore {
     /// # Errors
     ///
     /// Returns the database failure.
-    pub async fn claim_next(&self) -> Result<Option<(Job, String)>, sqlx::Error> {
+    pub async fn claim_next(
+        &self,
+        runner_id: &str,
+        lease_ms: i64,
+    ) -> Result<Option<(Job, String)>, sqlx::Error> {
         loop {
             let Some(id) = sqlx::query_scalar::<_, String>(
                 "SELECT id FROM bop_jobs WHERE state = 'queued' ORDER BY created_at_ms, id LIMIT 1",
@@ -288,15 +330,20 @@ impl JobStore {
             let now = now_ms();
             let claimed = sqlx::query(
                 "UPDATE bop_jobs SET state = 'running', error = NULL, started_at_ms = $1, \
-                 updated_at_ms = $2, finished_at_ms = NULL WHERE id = $3 AND state = 'queued'",
+                 updated_at_ms = $2, finished_at_ms = NULL, runner_id = $3, \
+                 lease_expires_at_ms = $4, cancel_requested = 0 \
+                 WHERE id = $5 AND state = 'queued'",
             )
             .bind(now)
             .bind(now)
+            .bind(runner_id)
+            .bind(now.saturating_add(lease_ms))
             .bind(&id)
             .execute(&self.pool)
             .await?
             .rows_affected();
             if claimed == 1 {
+                self.announce(&id).await;
                 let job = self.get(&id).await?.ok_or(sqlx::Error::RowNotFound)?;
                 let config = self.config(&id).await?.ok_or(sqlx::Error::RowNotFound)?;
                 return Ok(Some((job, config)));
@@ -304,18 +351,53 @@ impl JobStore {
         }
     }
 
-    /// Records the committed scene count.
+    /// Extends the lease `runner_id` holds on a running job. Returns whether a
+    /// cancel was requested, or `None` when the lease is no longer held: the
+    /// job was queued again by another server and must not be touched.
     ///
     /// # Errors
     ///
     /// Returns the database failure.
-    pub async fn set_progress(&self, id: &str, committed: i64) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE bop_jobs SET committed_scenes = $1, updated_at_ms = $2 WHERE id = $3")
-            .bind(committed)
-            .bind(now_ms())
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+    pub async fn renew_lease(
+        &self,
+        id: &str,
+        runner_id: &str,
+        lease_ms: i64,
+    ) -> Result<Option<bool>, sqlx::Error> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "UPDATE bop_jobs SET lease_expires_at_ms = $1 WHERE id = $2 AND runner_id = $3 \
+             AND state IN ('running', 'finalizing') RETURNING cancel_requested",
+        )
+        .bind(now_ms().saturating_add(lease_ms))
+        .bind(id)
+        .bind(runner_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(|cancel| cancel != 0))
+    }
+
+    /// Records the committed scene count of a job `runner_id` runs.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database failure.
+    pub async fn set_progress(
+        &self,
+        id: &str,
+        runner_id: &str,
+        committed: i64,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "UPDATE bop_jobs SET committed_scenes = $1, updated_at_ms = $2 \
+             WHERE id = $3 AND runner_id = $4",
+        )
+        .bind(committed)
+        .bind(now_ms())
+        .bind(id)
+        .bind(runner_id)
+        .execute(&self.pool)
+        .await?;
+        self.announce(id).await;
         Ok(())
     }
 
@@ -342,7 +424,47 @@ impl JobStore {
         .bind(id)
         .execute(&self.pool)
         .await?;
+        self.announce(id).await;
         Ok(())
+    }
+
+    /// Moves a job `runner_id` runs to `state`, as [`Self::set_state`] does,
+    /// and releases it unless it is still running or finalizing. Returns
+    /// `false`, changing nothing, when `runner_id` no longer holds the job.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database failure.
+    pub async fn set_runner_state(
+        &self,
+        id: &str,
+        runner_id: &str,
+        state: JobState,
+        error: Option<&str>,
+    ) -> Result<bool, sqlx::Error> {
+        let now = now_ms();
+        let held = matches!(state, JobState::Running | JobState::Finalizing);
+        let changed = sqlx::query(
+            "UPDATE bop_jobs SET state = $1, error = $2, updated_at_ms = $3, finished_at_ms = $4, \
+             runner_id = CASE WHEN $5 = 1 THEN runner_id ELSE NULL END, \
+             lease_expires_at_ms = CASE WHEN $6 = 1 THEN lease_expires_at_ms ELSE NULL END \
+             WHERE id = $7 AND runner_id = $8",
+        )
+        .bind(state.as_str())
+        .bind(error)
+        .bind(now)
+        .bind(state.is_terminal().then_some(now))
+        .bind(i64::from(held))
+        .bind(i64::from(held))
+        .bind(id)
+        .bind(runner_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if changed == 1 {
+            self.announce(id).await;
+        }
+        Ok(changed == 1)
     }
 
     /// Cancels a job that has not started. Returns whether it was queued.
@@ -362,6 +484,30 @@ impl JobStore {
         .execute(&self.pool)
         .await?
         .rows_affected();
+        if changed == 1 {
+            self.announce(id).await;
+        }
+        Ok(changed == 1)
+    }
+
+    /// Asks the server running a job to stop it. Returns whether it is running.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database failure.
+    pub async fn request_cancel(&self, id: &str) -> Result<bool, sqlx::Error> {
+        let changed = sqlx::query(
+            "UPDATE bop_jobs SET cancel_requested = 1, updated_at_ms = $1 \
+             WHERE id = $2 AND state IN ('running', 'finalizing')",
+        )
+        .bind(now_ms())
+        .bind(id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if changed == 1 {
+            self.announce(id).await;
+        }
         Ok(changed == 1)
     }
 
@@ -372,33 +518,69 @@ impl JobStore {
     /// Returns the database failure.
     pub async fn requeue(&self, id: &str) -> Result<bool, sqlx::Error> {
         let changed = sqlx::query(
-            "UPDATE bop_jobs SET state = 'queued', error = NULL, updated_at_ms = $1 \
-             WHERE id = $2 AND state IN ('failed', 'cancelled')",
+            "UPDATE bop_jobs SET state = 'queued', error = NULL, updated_at_ms = $1, \
+             cancel_requested = 0 WHERE id = $2 AND state IN ('failed', 'cancelled')",
         )
         .bind(now_ms())
         .bind(id)
         .execute(&self.pool)
         .await?
         .rows_affected();
+        if changed == 1 {
+            self.announce(id).await;
+        }
         Ok(changed == 1)
     }
 
-    /// Queues every job a previous server process left running; returns how many.
-    ///
-    /// Only safe when this server is the only runner using the database.
+    /// Releases every running job whose lease ran out (or that was claimed
+    /// before leases existed), and, with `runner_id`, every one that runner
+    /// holds regardless of its lease. A job with a pending cancel becomes
+    /// `cancelled`; the others are queued again. Returns the released jobs.
     ///
     /// # Errors
     ///
     /// Returns the database failure.
-    pub async fn requeue_interrupted(&self) -> Result<u64, sqlx::Error> {
-        Ok(sqlx::query(
-            "UPDATE bop_jobs SET state = 'queued', updated_at_ms = $1 \
-             WHERE state IN ('running', 'finalizing')",
+    pub async fn release_interrupted(
+        &self,
+        runner_id: Option<&str>,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        let now = now_ms();
+        let released = sqlx::query_scalar::<_, String>(
+            "UPDATE bop_jobs SET \
+             state = CASE WHEN cancel_requested = 1 THEN 'cancelled' ELSE 'queued' END, \
+             finished_at_ms = CASE WHEN cancel_requested = 1 THEN $1 ELSE NULL END, \
+             cancel_requested = 0, runner_id = NULL, lease_expires_at_ms = NULL, updated_at_ms = $2 \
+             WHERE state IN ('running', 'finalizing') \
+             AND (lease_expires_at_ms IS NULL OR lease_expires_at_ms < $3 OR runner_id = $4) \
+             RETURNING id",
         )
-        .bind(now_ms())
-        .execute(&self.pool)
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .bind(runner_id)
+        .fetch_all(&self.pool)
+        .await?;
+        for id in &released {
+            self.announce(id).await;
+        }
+        Ok(released)
+    }
+
+    /// Reports whether a job is running under `runner_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database failure.
+    pub async fn is_held_by(&self, id: &str, runner_id: &str) -> Result<bool, sqlx::Error> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bop_jobs WHERE id = $1 AND runner_id = $2 \
+             AND state IN ('running', 'finalizing')",
+        )
+        .bind(id)
+        .bind(runner_id)
+        .fetch_one(&self.pool)
         .await?
-        .rows_affected())
+            > 0)
     }
 }
 
@@ -774,6 +956,11 @@ fn migrator() -> Migrator {
             2,
             "storage_index",
             include_str!("../migrations/0002_storage_index.sql"),
+        ),
+        migration(
+            3,
+            "job_leases",
+            include_str!("../migrations/0003_job_leases.sql"),
         ),
     ])
 }

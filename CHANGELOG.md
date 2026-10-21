@@ -22,6 +22,18 @@ All notable changes to this project are documented here. The format follows
   entity tag, so a job reusing an asset does not download it again.
 - **`BOP_STORAGE_CONCURRENCY`** (default 32): storage requests a job upload,
   asset download, or export keeps in flight.
+- **Job leases.** Several servers can share one database: a running job is
+  leased to its server (`BOP_RUNNER_ID`), and any server queues a job whose
+  lease ran out again. The server that continues it rebuilds the local copy
+  from storage, so committed scenes are not rendered again.
+- **Cancel through any server.** A cancel request reaches the job whichever
+  server runs it.
+- **Live updates across servers.** On PostgreSQL, job changes are announced
+  with `NOTIFY`: event streams follow jobs on every server, and idle servers
+  start new jobs at once.
+- **Local data retention.** `BOP_LOCAL_RETENTION_DAYS` (default 14) deletes
+  local copies of failed and cancelled jobs, and cached copies of replaced
+  assets, once they are that old.
 
 ### Changed
 
@@ -34,6 +46,14 @@ All notable changes to this project are documented here. The format follows
   being packed wait for it instead of packing it again.
 - **The BOP export is stored only as `bop.tar`.** Job file listings no
   longer include `bop/...`; jobs from earlier versions keep theirs.
+- **`BOP_REQUEUE_ON_START`** now only queues the jobs this server left
+  running, so it is safe with several servers.
+- **Run metadata is stored with the first scenes** instead of after the run.
+- **Depth is ZIP-compressed.** `depth.exr` is written as ZIP in 16-scanline
+  blocks instead of tiled RLE, which barely compressed float depth: rendered
+  depth takes 5–17% of its former size, and wgpu datasets shrink about 7×.
+  The pixels are unchanged and every OpenEXR reader supports it. Older
+  datasets keep their RLE files; bop-studio reads both.
 
 ### Fixed
 

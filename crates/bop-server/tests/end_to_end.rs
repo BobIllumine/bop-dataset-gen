@@ -171,3 +171,125 @@ async fn assert_exports_ready(app: &Router, sqlite: &std::path::Path, id: &str) 
         }
     }
 }
+
+/// One server of several sharing `shared`'s database and storage (or the
+/// `BOP_TEST_*` ones). Servers that continue each other's jobs must agree on
+/// the data directory path, which the resolved configuration records, as
+/// containers do with `/var/lib/bop`.
+fn shared_server(shared: &std::path::Path, name: &str) -> bop_server::settings::Settings {
+    let data_dir = shared.join("data").display().to_string();
+    let database = std::env::var("BOP_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| format!("sqlite://{}?mode=rwc", shared.join("bop.db").display()));
+    let storage = std::env::var("BOP_TEST_STORAGE_URL")
+        .unwrap_or_else(|_| format!("file://{}/storage", shared.display()));
+    let name = name.to_owned();
+    bop_server::settings::Settings::from_vars(move |variable| match variable {
+        "BOP_DATA_DIR" => Some(data_dir.clone()),
+        "BOP_RUNNER_ID" => Some(name.clone()),
+        "BOP_DATABASE_URL" => Some(database.clone()),
+        "BOP_STORAGE_URL" => Some(storage.clone()),
+        _ => None,
+    })
+    .unwrap()
+}
+
+async fn job_state(app: &Router, id: &str) -> Value {
+    send(app, "GET", &format!("/api/v1/jobs/{id}"), Body::empty())
+        .await
+        .1
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires a wgpu adapter; set BOP_TEST_DATABASE_URL and BOP_TEST_STORAGE_URL for PostgreSQL and S3"]
+async fn another_server_continues_a_job_from_what_storage_holds() {
+    let shared = tempfile::tempdir().unwrap();
+    let (app, first) = bop_server::build(shared_server(shared.path(), "first"))
+        .await
+        .unwrap();
+    let running = tokio::spawn(first.clone().run());
+    send(&app, "PUT", "/api/v1/assets/cube.stl", Body::from(CUBE)).await;
+    let config = SMOKE
+        .replace("\"../assets/cube.stl\"", "\"cube.stl\"")
+        .replace("valid_scene_count = 8", "valid_scene_count = 40");
+    let request = serde_json::json!({ "config": config, "renderer": "wgpu", "export_bop": false });
+    let (status, created) = send(
+        &app,
+        "POST",
+        "/api/v1/jobs",
+        Body::from(request.to_string()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().unwrap().to_owned();
+
+    tokio::time::timeout(Duration::from_mins(10), async {
+        while job_state(&app, &id).await["committed_scenes"]
+            .as_i64()
+            .unwrap()
+            < 3
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the first server commits some scenes");
+    first.shutdown();
+    running.await.unwrap();
+    let stopped = job_state(&app, &id).await;
+    assert_eq!(stopped["state"], "queued", "{stopped}");
+    let before = stopped["committed_scenes"].as_i64().unwrap();
+    assert!(
+        before < 40,
+        "the job finished before it could move: {stopped}"
+    );
+
+    // A second machine: same layout, none of the first one's local files.
+    std::fs::remove_dir_all(shared.path().join("data/jobs")).unwrap();
+    let (app, second) = bop_server::build(shared_server(shared.path(), "second"))
+        .await
+        .unwrap();
+    let mut events = second.subscribe();
+    let running = tokio::spawn(second.clone().run());
+    let lowest = tokio::time::timeout(Duration::from_mins(10), async {
+        let mut lowest = i64::MAX;
+        loop {
+            let event = events.recv().await.unwrap();
+            if event.job_id != id {
+                continue;
+            }
+            match serde_json::to_value(&event).unwrap()["state"]
+                .as_str()
+                .unwrap()
+            {
+                "running" => lowest = lowest.min(event.committed_scenes),
+                "succeeded" => return lowest,
+                "failed" | "cancelled" => panic!("job stopped: {event:?}"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("the second server finishes the job");
+    assert!(
+        lowest >= before,
+        "progress fell to {lowest} from {before}: scenes were rendered again"
+    );
+    let job = job_state(&app, &id).await;
+    assert_eq!(job["committed_scenes"], 40, "{job}");
+    let (_, files) = send(
+        &app,
+        "GET",
+        &format!("/api/v1/jobs/{id}/files"),
+        Body::empty(),
+    )
+    .await;
+    let frames = files
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|file| file["path"].as_str().unwrap().ends_with("/rgb.png"))
+        .count();
+    assert!(frames >= 40, "expected a frame per scene, found {frames}");
+    second.shutdown();
+    running.await.unwrap();
+}

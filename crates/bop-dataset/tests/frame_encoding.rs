@@ -121,6 +121,43 @@ fn depth_is_written_losslessly_as_single_channel_float_exr() {
         .unwrap();
     assert_eq!(image.layer_data.size, Vec2(2, 2));
     assert_eq!(image.layer_data.channel_data.pixels, depths);
+    let header = &image.layer_data;
+    assert_eq!(header.encoding.compression, Compression::ZIP16);
+    assert_eq!(header.encoding.blocks, Blocks::ScanLines);
+}
+
+#[test]
+fn depth_files_are_deterministic_and_zip_compressed() {
+    let directory = tempfile::tempdir().unwrap();
+    // Rendered-like depth: a smooth surface over a background of zeros.
+    let (width, height) = (96_u16, 40_u16);
+    let depths = (0..height)
+        .flat_map(|y| (0..width).map(move |x| (f32::from(x), f32::from(y))))
+        .map(|(x, y)| {
+            if x < 10.0 {
+                0.0
+            } else {
+                0.5 + 0.003 * x + 0.0007 * y * y
+            }
+        })
+        .collect::<Vec<_>>();
+    let (width, height) = (u32::from(width), u32::from(height));
+    let write = |name: &str| {
+        let path = directory.path().join(name);
+        DepthFrame::try_new(width, height, depths.clone())
+            .unwrap()
+            .write_exr(&path)
+            .unwrap();
+        std::fs::read(path).unwrap()
+    };
+    let first = write("a.exr");
+    assert_eq!(first, write("b.exr"));
+    let raw = (width * height * 4) as usize;
+    assert!(
+        first.len() < raw,
+        "{} bytes for {raw} bytes of depth",
+        first.len()
+    );
 }
 
 #[test]

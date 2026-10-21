@@ -6,8 +6,14 @@
 //! every table can be rebuilt from a listing: the asset index at each start,
 //! a job's files on first use for jobs stored before the index existed.
 
-use std::{future::Future, time::Duration};
+use std::{
+    collections::{BTreeSet, HashMap},
+    future::Future,
+    path::Path,
+    time::Duration,
+};
 
+use futures::StreamExt as _;
 use thiserror::Error;
 
 use crate::{
@@ -32,6 +38,22 @@ pub enum IndexError {
     /// A background packing task panicked.
     #[error("export task failed: {0}")]
     Task(#[from] tokio::task::JoinError),
+    /// A local file could not be written.
+    #[error("{path}: {source}")]
+    Local {
+        /// Local path.
+        path: String,
+        /// Underlying error.
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+fn local(path: &Path) -> impl FnOnce(std::io::Error) -> IndexError + '_ {
+    move |source| IndexError::Local {
+        path: path.display().to_string(),
+        source,
+    }
 }
 
 /// Storage key of a job's packed `format` export.
@@ -189,4 +211,141 @@ where
         }
     })
     .await?
+}
+
+/// Rebuilds a job's local copy in `dataset` from what storage holds: every
+/// scene whose files its `checksums.json` lists are all stored, and the run
+/// metadata. Scenes already present locally are left alone. Each scene is
+/// assembled in a hidden directory and moved into place whole, and `run.json`
+/// comes last, so an interrupted rebuild is simply started again. Returns how
+/// many scenes were rebuilt.
+///
+/// # Errors
+///
+/// Returns the listing, database, download, or file failure.
+pub async fn rebuild_local_copy(
+    jobs: &JobStore,
+    storage: &Storage,
+    job_id: &str,
+    dataset: &Path,
+) -> Result<usize, IndexError> {
+    ensure_job_files_indexed(jobs, storage, job_id).await?;
+    let stored = jobs
+        .job_files(job_id)
+        .await?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    if stored.is_empty() {
+        return Ok(0);
+    }
+    let staging = dataset.join(".rebuild");
+    if staging.exists() {
+        tokio::fs::remove_dir_all(&staging)
+            .await
+            .map_err(local(&staging))?;
+    }
+    let scenes = stored
+        .keys()
+        .filter_map(|path| path.strip_prefix("scenes/")?.split_once('/'))
+        .map(|(scene, _)| scene.to_owned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|scene| {
+            stored.contains_key(&format!("scenes/{scene}/checksums.json"))
+                && !dataset.join("scenes").join(scene).exists()
+        })
+        .collect::<Vec<_>>();
+    let key = |path: &str| format!("datasets/{job_id}/{path}");
+    let complete = complete_scenes(storage, &stored, &scenes, &staging, &key).await?;
+    let downloads = complete
+        .iter()
+        .flat_map(|(scene, files)| files.iter().map(move |file| (*scene, file)))
+        .collect::<Vec<_>>();
+    let fetches = downloads
+        .iter()
+        .map(|(scene, file)| {
+            let target = staging.join(scene).join(file);
+            let source = key(&format!("scenes/{scene}/{file}"));
+            async move { storage.download(&source, &target).await }
+        })
+        .collect::<Vec<_>>();
+    for fetched in futures::stream::iter(fetches)
+        .buffer_unordered(storage.concurrency())
+        .collect::<Vec<_>>()
+        .await
+    {
+        fetched?;
+    }
+    let scenes_dir = dataset.join("scenes");
+    tokio::fs::create_dir_all(&scenes_dir)
+        .await
+        .map_err(local(&scenes_dir))?;
+    for (scene, _) in &complete {
+        let target = scenes_dir.join(scene);
+        tokio::fs::rename(staging.join(scene), &target)
+            .await
+            .map_err(local(&target))?;
+    }
+    for name in ["environment.json", "resolved-config.toml", "run.json"] {
+        if stored.contains_key(name) {
+            storage.download(&key(name), &dataset.join(name)).await?;
+        }
+    }
+    if staging.exists() {
+        tokio::fs::remove_dir_all(&staging)
+            .await
+            .map_err(local(&staging))?;
+    }
+    Ok(complete.len())
+}
+
+/// The `scenes` whose files, as their stored `checksums.json` lists them, are
+/// all in `stored`, with those files. Each listing is downloaded to `staging`.
+async fn complete_scenes<'a>(
+    storage: &Storage,
+    stored: &HashMap<String, u64>,
+    scenes: &'a [String],
+    staging: &Path,
+    key: &impl Fn(&str) -> String,
+) -> Result<Vec<(&'a String, Vec<String>)>, IndexError> {
+    // Futures built up front: a mapping closure would make the caller's future not `Send`.
+    let listings = scenes
+        .iter()
+        .map(|scene| async move {
+            let target = staging.join(scene).join("checksums.json");
+            storage
+                .download(&key(&format!("scenes/{scene}/checksums.json")), &target)
+                .await?;
+            let bytes = tokio::fs::read(&target).await.map_err(local(&target))?;
+            let files: Option<Vec<String>> = serde_json::from_slice::<serde_json::Value>(&bytes)
+                .ok()
+                .and_then(|checksums| {
+                    Some(
+                        checksums
+                            .get("files")?
+                            .as_object()?
+                            .keys()
+                            .cloned()
+                            .collect(),
+                    )
+                });
+            Ok::<_, IndexError>((scene, files))
+        })
+        .collect::<Vec<_>>();
+    let mut complete = Vec::new();
+    for listed in futures::stream::iter(listings)
+        .buffer_unordered(storage.concurrency())
+        .collect::<Vec<_>>()
+        .await
+    {
+        let (scene, files) = listed?;
+        if let Some(files) = files
+            && files
+                .iter()
+                .all(|file| stored.contains_key(&format!("scenes/{scene}/{file}")))
+        {
+            complete.push((scene, files));
+        }
+    }
+    Ok(complete)
 }

@@ -57,7 +57,9 @@ the community fork `pgsty/minio`. Any S3-compatible store works in its place.
 | `BOP_ALLOW_ANONYMOUS` | `false` | Serve `/api` without credentials on a non-loopback address. Without it, such a server exits with status 2. |
 | `BOP_MAX_SCENES` | `100000` | Largest `valid_scene_count` accepted. |
 | `BOP_KEEP_LOCAL` | `false` | Keep a succeeded job's local copy after storing it. |
-| `BOP_REQUEUE_ON_START` | `true` | Queue jobs left running by the previous process. Turn off when several servers share a database. |
+| `BOP_REQUEUE_ON_START` | `true` | At start, queue the jobs this server's previous process left running at once, instead of after their lease runs out. |
+| `BOP_RUNNER_ID` | the host name | This server's name in job leases. Must be unique among servers sharing a database, and stable across restarts for `BOP_REQUEUE_ON_START` to recognize its own jobs. |
+| `BOP_LOCAL_RETENTION_DAYS` | `14` | Delete local copies of failed and cancelled jobs untouched this long, and asset-cache entries of replaced or deleted assets. Resume rebuilds a deleted copy from storage. `0` keeps everything. |
 | `BOP_BLENDERPROC_EXECUTABLE`, `BOP_BLENDERPROC_WORKER` | `blenderproc`, the bundled worker | The only BlenderProc programs a job can run. |
 | `BOP_CORS_ORIGINS` | unset | Comma-separated browser origins, or `*`, allowed to call the API from another host, such as a separately hosted web UI. Unset allows same-origin only. |
 | `BOP_LOG` | `info` | Log filter. |
@@ -165,18 +167,21 @@ unpacked BOP export, and get their archives packed on first request.
 
 - **When scenes are uploaded:** each scene is uploaded as soon as it commits,
   so partial results of a running, cancelled, or failed job are readable.
-- **Run metadata:** `run.json`, `resolved-config.toml`, `environment.json`
-  and the models follow after the run.
+- **Run metadata:** `run.json`, `resolved-config.toml`, and
+  `environment.json` go up with the first scenes, so another server can
+  continue the run from storage. The models and any other files follow after
+  the run.
 - **Uploads:** up to `BOP_STORAGE_CONCURRENCY` files at a time; scenes that
   commit while an upload is in flight go up together next.
 - **Finishing:** before a job succeeds, the dataset is validated as by
   `bop-gen validate`, then packed into its export archives from the local
   copy, so an export link is ready as soon as the job succeeds.
-- **Resume:** scenes storage already holds are not uploaded again; run
-  metadata is, since every attempt rewrites it.
+- **Resume:** scenes storage already holds are not uploaded again. Files
+  written after the run are, since an attempt may change them.
 - **Assets:** a job fetches its assets into `<data>/asset-cache`, keyed by
   the stored object's entity tag, and links them from there; a replaced
-  asset is fetched again. The cache is not trimmed.
+  asset is fetched again. Entries of replaced or deleted assets are removed
+  after `BOP_LOCAL_RETENTION_DAYS`' hourly sweep.
 
 ### Storage index
 
@@ -194,19 +199,49 @@ check, job file listings, and export links read it instead of storage.
   progress, as after a crash, is taken over.
 - **Local copy:** the copy under `<data>/jobs/<job-id>` is what resume
   continues from. It is deleted once a job succeeds, unless `BOP_KEEP_LOCAL`
-  is set.
+  is set, and for failed and cancelled jobs after `BOP_LOCAL_RETENTION_DAYS`.
+  When a job has no local copy, it is first rebuilt from storage: every scene
+  whose files are all stored, and the run metadata. Scenes cut off mid-upload
+  are rendered again.
+
+| What | Where | Removed |
+| --- | --- | --- |
+| A job's working copy | `<data>/jobs/<job-id>` | When it succeeds (unless `BOP_KEEP_LOCAL`); failed or cancelled, after the retention period |
+| Convex decompositions | `<data>/cache` | Never; delete it by hand to reclaim space |
+| Downloaded assets | `<data>/asset-cache` | Versions no longer in the library, after the retention period |
 
 ## Lifecycle
 
 `queued → running → finalizing → succeeded`, or `failed` / `cancelled`.
 
 - **Cancel:** cancelling a queued job takes effect at once. A running job
-  stops after its in-flight scenes commit.
+  stops after its in-flight scenes commit, whichever server it runs on.
 - **Resume:** `failed` and `cancelled` jobs can be resumed. The run continues
-  from the scenes already committed locally.
+  from the scenes already committed, on any server.
 - **Server shutdown:** SIGTERM or Ctrl-C lets in-flight scenes commit, then
-  returns the job to `queued`. The next start continues it. This is why the
-  compose file sets a long `stop_grace_period`.
+  returns the job to `queued`. The next start, or another server, continues
+  it. This is why the compose file sets a long `stop_grace_period`.
+
+### Several servers
+
+Servers sharing a database (and storage) share the queue.
+
+- **Leases:** the server running a job renews a 60-second lease every
+  10 seconds. Every server checks every 15 seconds for jobs whose lease ran
+  out, such as after a crash, and queues them again (or marks them
+  `cancelled` if a cancel was pending). A server that finds it lost a lease
+  stops the job without recording anything.
+- **Continuing elsewhere:** the server that picks up such a job rebuilds the
+  local copy from storage, so committed scenes are not rendered again. That
+  needs the same `BOP_DATA_DIR` path (the resolved configuration records the
+  cache inside it; containers all use `/var/lib/bop`) and the same render
+  device and build, since a dataset never mixes outputs of different
+  platforms. Otherwise the job fails with "existing dataset manifest is
+  incompatible", and resuming it on a matching server continues it.
+- **Live updates:** on PostgreSQL, every job change is announced with
+  `NOTIFY`, so event streams on every server follow jobs running on any of
+  them, and an idle server starts a new job at once. On SQLite, a single
+  server, idle servers check every 5 seconds.
 
 ## API
 
@@ -253,9 +288,8 @@ curl -N localhost:8080/api/v1/jobs/<id>/events
 
 ## Limits
 
-- **Several servers on one database:** they claim queued jobs safely,
-  through a conditional update. Cancellation, however, reaches only the
-  server running the job. Set `BOP_REQUEUE_ON_START=false` on such setups.
+- **Several servers on one database:** see [Several servers](#several-servers)
+  for what a job needs to continue on another server.
 - **Authorization:** authentication is all or nothing. There are no roles or
   per-user jobs; anyone the server accepts can use every route.
 - **Depth previews:** depth is stored as EXR, which browsers do not display.

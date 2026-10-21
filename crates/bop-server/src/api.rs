@@ -825,17 +825,18 @@ async fn cancel_job(State(state): State<AppState>, Path(id): Path<String>) -> Re
         Ok(false) => {}
         Err(source) => return internal(source),
     }
-    if state.runner.cancel(&id) {
-        // The job stops after its in-flight scenes commit; tell watchers now.
-        if let Ok(Some(job)) = state.jobs.get(&id).await {
-            state.runner.announce(&job);
+    // The server running the job hears of the request through the database.
+    match state.jobs.request_cancel(&id).await {
+        Ok(true) => {
+            state.runner.cancel(&id);
+            // The job stops after its in-flight scenes commit; tell watchers now.
+            if let Ok(Some(job)) = state.jobs.get(&id).await {
+                state.runner.announce(&job);
+            }
+            StatusCode::ACCEPTED.into_response()
         }
-        StatusCode::ACCEPTED.into_response()
-    } else {
-        error(
-            StatusCode::CONFLICT,
-            "job is neither queued nor running on this server",
-        )
+        Ok(false) => error(StatusCode::CONFLICT, "job is neither queued nor running"),
+        Err(source) => internal(source),
     }
 }
 
