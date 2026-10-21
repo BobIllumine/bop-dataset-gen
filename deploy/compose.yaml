@@ -36,6 +36,10 @@ services:
       BOP_ALLOW_ANONYMOUS: ${BOP_ALLOW_ANONYMOUS:-false}
       BOP_CORS_ORIGINS: ${BOP_CORS_ORIGINS:-}
       BOP_MAX_SCENES: ${BOP_MAX_SCENES:-100000}
+      BOP_STORAGE_CONCURRENCY: ${BOP_STORAGE_CONCURRENCY:-32}
+      BOP_LOCAL_RETENTION_DAYS: ${BOP_LOCAL_RETENTION_DAYS:-14}
+      # Unique per server sharing the database, stable across restarts.
+      BOP_RUNNER_ID: ${BOP_RUNNER_ID:-bop-server}
       BOP_LOG: ${BOP_LOG:-info}
       AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:-http://minio:9000}
       AWS_ALLOW_HTTP: ${AWS_ALLOW_HTTP:-true}

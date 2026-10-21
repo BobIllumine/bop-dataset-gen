@@ -21,7 +21,7 @@ dataset/
             └── 00001/             camera ID, 5 digits
                 ├── frame.json     camera intrinsics and extrinsics
                 ├── rgb.png        8-bit sRGB
-                ├── depth.exr      32-bit float camera-Z metres
+                ├── depth.exr      32-bit float camera-Z metres, ZIP in 16-line blocks
                 └── instance.png   16-bit visible instance IDs, 0 = background
 ```
 

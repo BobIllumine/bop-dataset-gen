@@ -30,11 +30,23 @@ pub struct Settings {
     pub allow_anonymous: bool,
     /// `BOP_MAX_SCENES`: largest `valid_scene_count` a job may request. Default 100000.
     pub max_scenes: u32,
+    /// `BOP_STORAGE_CONCURRENCY`: storage requests one job upload, download,
+    /// or export keeps in flight. Default 32.
+    pub storage_concurrency: usize,
     /// `BOP_KEEP_LOCAL`: keep a succeeded job's local copy after storing it. Default false.
     pub keep_local: bool,
-    /// `BOP_REQUEUE_ON_START`: queue jobs a previous process left running.
-    /// Default true; turn off when several servers share one database.
+    /// `BOP_REQUEUE_ON_START`: at start, queue the jobs this server's previous
+    /// process left running, without waiting for their leases to run out.
+    /// Default true.
     pub requeue_on_start: bool,
+    /// `BOP_RUNNER_ID`: this server's name in job leases; unique among the
+    /// servers sharing a database and stable across restarts. Default the
+    /// host name.
+    pub runner_id: String,
+    /// `BOP_LOCAL_RETENTION_DAYS`: delete local copies of failed and
+    /// cancelled jobs untouched this long, and asset-cache entries of replaced
+    /// or deleted assets. `0` keeps everything. Default 14.
+    pub local_retention_days: u32,
     /// `BOP_BLENDERPROC_EXECUTABLE` and `BOP_BLENDERPROC_WORKER`. Submitted
     /// configurations cannot choose these.
     pub blenderproc: BlenderProcRuntime,
@@ -74,6 +86,14 @@ impl Settings {
         let max_scenes = var("BOP_MAX_SCENES")
             .map_or(Ok(100_000), |value| value.parse())
             .map_err(|error| format!("BOP_MAX_SCENES: {error}"))?;
+        let storage_concurrency = match var("BOP_STORAGE_CONCURRENCY") {
+            None => 32,
+            Some(value) => match value.parse::<usize>() {
+                Ok(count) if count > 0 => count,
+                Ok(_) => return Err("BOP_STORAGE_CONCURRENCY must be at least 1".to_owned()),
+                Err(error) => return Err(format!("BOP_STORAGE_CONCURRENCY: {error}")),
+            },
+        };
         let flag = |name: &str, default: bool| match var(name).as_deref() {
             None => Ok(default),
             Some("1" | "true") => Ok(true),
@@ -97,8 +117,13 @@ impl Settings {
             oidc,
             allow_anonymous,
             max_scenes,
+            storage_concurrency,
             keep_local: flag("BOP_KEEP_LOCAL", false)?,
             requeue_on_start: flag("BOP_REQUEUE_ON_START", true)?,
+            runner_id: var("BOP_RUNNER_ID").unwrap_or_else(host_name),
+            local_retention_days: var("BOP_LOCAL_RETENTION_DAYS")
+                .map_or(Ok(14), |value| value.parse())
+                .map_err(|error| format!("BOP_LOCAL_RETENTION_DAYS: {error}"))?,
             blenderproc: BlenderProcRuntime {
                 executable: Some(
                     var("BOP_BLENDERPROC_EXECUTABLE")
@@ -123,6 +148,12 @@ impl Settings {
     #[must_use]
     pub fn cache_dir(&self) -> PathBuf {
         self.data_dir.join("cache")
+    }
+
+    /// Downloaded library assets, keyed by entity tag and shared by every job.
+    #[must_use]
+    pub fn asset_cache_dir(&self) -> PathBuf {
+        self.data_dir.join("asset-cache")
     }
 }
 
@@ -192,6 +223,16 @@ fn list(value: Option<String>) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// `HOSTNAME`, else the kernel's host name, else `bop-server`.
+fn host_name() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "bop-server".to_owned())
 }
 
 fn is_loopback(listen: &SocketAddr) -> bool {

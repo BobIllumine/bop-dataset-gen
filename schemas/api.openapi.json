@@ -1008,7 +1008,7 @@
         "properties": {
           "cancel_requested": {
             "type": "boolean",
-            "description": "A cancel was requested while the job is running; it stops once its\nin-flight scenes commit. Not stored: only the running server knows."
+            "description": "A cancel was requested while the job is running; it stops once its\nin-flight scenes commit."
           },
           "committed_scenes": {
             "type": "integer",

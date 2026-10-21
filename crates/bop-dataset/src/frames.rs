@@ -7,7 +7,7 @@ use std::{
 };
 
 use bop_core::PngCompression;
-use exr::prelude::{Image, SpecificChannels, Vec2, WritableImage};
+use exr::prelude::{Encoding, Image, SpecificChannels, Vec2, WritableImage};
 
 const fn png_level(compression: PngCompression) -> png::Compression {
     match compression {
@@ -200,7 +200,10 @@ impl DepthFrame {
         })
     }
 
-    /// Writes canonical linear metric depth as one 32-bit float `Z` channel.
+    /// Writes canonical linear metric depth as one 32-bit float `Z` channel,
+    /// ZIP-compressed in blocks of 16 scanlines. Depth dominates a dataset's
+    /// size, and ZIP stores rendered depth in a small fraction of what RLE
+    /// (the crate's default) does.
     ///
     /// # Errors
     ///
@@ -214,10 +217,12 @@ impl DepthFrame {
                 .with_pixel_fn(|position: Vec2<usize>| {
                     (self.metres[position.y() * width + position.x()],)
                 });
-        // Sequential encoding keeps chunk order, and so the file bytes, deterministic.
-        Image::from_channels((width, height), pixels)
+        // Blocks are compressed in parallel. The encoding's increasing line
+        // order makes the writer store them in order regardless, so the file
+        // bytes stay deterministic; with an unspecified line order they would
+        // follow completion order instead.
+        Image::from_encoded_channels((width, height), Encoding::SMALL_LOSSLESS, pixels)
             .write()
-            .non_parallel()
             .to_file(path)?;
         Ok(())
     }

@@ -201,8 +201,8 @@ server*.
   Stopping lets in-flight scenes commit (up to the 5-minute grace period), and
   the interrupted job continues on the next start.
 - **Backups:** PostgreSQL and the bucket hold everything that matters. The
-  `bop-data` volume holds the decomposition cache and the local copy of
-  unfinished jobs, which is what resume continues from.
+  `bop-data` volume holds caches and the local copy of unfinished jobs, which
+  resume rebuilds from the bucket when it is gone.
 - **Logs:** `docker compose -f deploy/compose.yaml logs -f bop-server`.
   `BOP_LOG=debug` also logs why each rejected request failed.
 - **Determinism:** datasets are byte-identical only on the same platform (see

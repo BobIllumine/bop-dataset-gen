@@ -13,6 +13,56 @@ All notable changes to this project are documented here. The format follows
   with a `tag` publishes an existing release again.
 - **Port settings.** `deploy/.env.example` documents `BOP_PORT` and
   `BOP_STUDIO_PORT` for hosts where 8080 or 3000 is taken.
+- **Storage index.** The server's database indexes the asset library, each
+  job's stored files, and its export archives, so asset listings, the
+  missing-asset check, job file listings, and export links no longer wait on
+  storage. Storage stays the source of truth: the asset index is rebuilt at
+  every start, and jobs from earlier versions are indexed on first use.
+- **Asset cache.** Jobs fetch assets into `<data>/asset-cache`, keyed by
+  entity tag, so a job reusing an asset does not download it again.
+- **`BOP_STORAGE_CONCURRENCY`** (default 32): storage requests a job upload,
+  asset download, or export keeps in flight.
+- **Job leases.** Several servers can share one database: a running job is
+  leased to its server (`BOP_RUNNER_ID`), and any server queues a job whose
+  lease ran out again. The server that continues it rebuilds the local copy
+  from storage, so committed scenes are not rendered again.
+- **Cancel through any server.** A cancel request reaches the job whichever
+  server runs it.
+- **Live updates across servers.** On PostgreSQL, job changes are announced
+  with `NOTIFY`: event streams follow jobs on every server, and idle servers
+  start new jobs at once.
+- **Local data retention.** `BOP_LOCAL_RETENTION_DAYS` (default 14) deletes
+  local copies of failed and cancelled jobs, and cached copies of replaced
+  assets, once they are that old.
+
+### Changed
+
+- **Faster storage transfers.** Result files, assets, and exports of older
+  jobs move several at a time instead of one by one, and a resumed job only
+  uploads the scenes storage does not hold yet.
+- **Exports are packed as jobs finish.** `dataset.tar`, and `bop.tar` for
+  jobs submitted with `export_bop`, are packed from the local copy before a
+  job succeeds, so export links are ready at once. Requests for an archive
+  being packed wait for it instead of packing it again.
+- **The BOP export is stored only as `bop.tar`.** Job file listings no
+  longer include `bop/...`; jobs from earlier versions keep theirs.
+- **`BOP_REQUEUE_ON_START`** now only queues the jobs this server left
+  running, so it is safe with several servers.
+- **Run metadata is stored with the first scenes** instead of after the run.
+- **Faster BOP export and validation.** `bop-gen export bop` and dataset
+  validation process scenes in parallel: on 1,000 rendered 640×480 scenes the
+  export takes 3.7 s instead of 22.9 s and validation 0.5 s instead of 3.2 s,
+  with byte-identical output. Together with reading files ahead while packing
+  archives, a server job's finishing step drops from about 31 s to about 5 s.
+- **Faster encoding.** The wgpu renderer encodes a frame's RGB, depth, and
+  instance images concurrently, and depth blocks are compressed in parallel;
+  generation at the presets' 4 renderer workers is about 15% faster, with
+  byte-identical output.
+- **Depth is ZIP-compressed.** `depth.exr` is written as ZIP in 16-scanline
+  blocks instead of tiled RLE, which barely compressed float depth: rendered
+  depth takes 5–17% of its former size, and wgpu datasets shrink about 7×.
+  The pixels are unchanged and every OpenEXR reader supports it. Older
+  datasets keep their RLE files; bop-studio reads both.
 
 ### Fixed
 

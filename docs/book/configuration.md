@@ -94,8 +94,9 @@ environment = { path = "skies/studio.hdr", intensity = 1.0, rotation_deg = 0.0 }
 `[output] png_compression` sets how hard RGB and instance PNGs are compressed:
 `fast` (default), `balanced` or `high`. The pixels are identical at every
 level. On rendered 640×480 frames `fast` encodes about 13 times faster than
-`balanced` for files about 30% larger, which is a few percent of a whole
-dataset, since depth EXRs dominate its size.
+`balanced` for files about 30% larger. Since depth is ZIP-compressed, RGB
+is more than half of a wgpu dataset, so the level matters more for its size
+than it did.
 
 ## Several bins
 
