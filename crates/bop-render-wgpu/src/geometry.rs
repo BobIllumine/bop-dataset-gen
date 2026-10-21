@@ -155,9 +155,15 @@ pub(crate) fn directional_shadow_matrix(
         glam::Vec3::Z
     };
     let eye = center - direction * (radius * 2.0 + 0.1);
-    let view = glam::Mat4::look_at_rh(eye, center, up);
-    let projection =
-        glam::Mat4::orthographic_rh(-radius, radius, -radius, radius, 0.01, radius * 4.0 + 0.2);
+    let view = glam::camera::rh::view::look_at_mat4(eye, center, up);
+    let projection = glam::camera::rh::proj::directx::orthographic(
+        -radius,
+        radius,
+        -radius,
+        radius,
+        0.01,
+        radius * 4.0 + 0.2,
+    );
     projection * view
 }
 
