@@ -394,6 +394,7 @@ dependencies = [
  "bop-render-wgpu",
  "exr",
  "png",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

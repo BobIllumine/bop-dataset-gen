@@ -676,6 +676,14 @@ impl Worker {
 impl Drop for Worker {
     fn drop(&mut self) {
         let _ = self.send(&json!({"protocol_version": PROTOCOL_VERSION, "type": "shutdown"}));
+        // `blenderproc run` starts Blender as its own child and passes on only
+        // SIGTERM, so killing the launcher alone would leave Blender running.
+        // The worker leads its own process group (see `spawn`); kill all of it.
+        #[cfg(unix)]
+        let _ = rustix::process::kill_process_group(
+            rustix::process::Pid::from_child(&self.child),
+            rustix::process::Signal::KILL,
+        );
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
