@@ -15,7 +15,7 @@ bop-core = { path = "../bop-core" }
 glam = "0.33"
 gltf = { version = "=1.4.1", default-features = false, features = ["utils"] }
 image = { version = "=0.25.10", default-features = false, features = ["hdr", "jpeg", "png"] }
-exr = "=1.74.0"
+exr = "=1.74.2"
 meshopt = "=0.7.0"
 serde_json = "1"
 parry3d = { version = "=0.30.2", default-features = false, features = ["alloc", "dim3", "f32", "std"] }

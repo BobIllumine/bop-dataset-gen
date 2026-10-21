@@ -19,11 +19,11 @@ serde_json = "1"
 thiserror = "2"
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "=1.1.4", features = ["process"] }
+rustix = { version = "=1.1.5", features = ["process"] }
 
 [dev-dependencies]
 blake3 = "=1.8.7"
 bop-render-wgpu = { path = "../bop-render-wgpu" }
-exr = "=1.74.0"
+exr = "=1.74.2"
 png = "=0.18.1"
 tempfile = "3"
