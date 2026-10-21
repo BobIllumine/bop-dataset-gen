@@ -6,6 +6,10 @@ use bop_run::BlenderProcRuntime;
 
 /// Everything the server needs to start.
 #[derive(Clone, Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is an independent BOP_* switch"
+)]
 pub struct Settings {
     /// `BOP_LISTEN`: address to serve on. Default `127.0.0.1:8080`; the
     /// container image sets `0.0.0.0:8080`.
@@ -43,6 +47,12 @@ pub struct Settings {
     /// servers sharing a database and stable across restarts. Default the
     /// host name.
     pub runner_id: String,
+    /// `BOP_SEED_EXAMPLES`: copy the bundled example meshes into an asset
+    /// library that has never received them. Default true.
+    pub seed_examples: bool,
+    /// Where the bundled example meshes are: `examples/` beside the
+    /// executable (the container layout), else this checkout's `examples/assets`.
+    pub examples_dir: PathBuf,
     /// `BOP_LOCAL_RETENTION_DAYS`: delete local copies of failed and
     /// cancelled jobs untouched this long, and asset-cache entries of replaced
     /// or deleted assets. `0` keeps everything. Default 14.
@@ -121,6 +131,8 @@ impl Settings {
             keep_local: flag("BOP_KEEP_LOCAL", false)?,
             requeue_on_start: flag("BOP_REQUEUE_ON_START", true)?,
             runner_id: var("BOP_RUNNER_ID").unwrap_or_else(host_name),
+            seed_examples: flag("BOP_SEED_EXAMPLES", true)?,
+            examples_dir: default_examples_dir(),
             local_retention_days: var("BOP_LOCAL_RETENTION_DAYS")
                 .map_or(Ok(14), |value| value.parse())
                 .map_err(|error| format!("BOP_LOCAL_RETENTION_DAYS: {error}"))?,
@@ -237,6 +249,19 @@ fn host_name() -> String {
 
 fn is_loopback(listen: &SocketAddr) -> bool {
     listen.ip().is_loopback()
+}
+
+/// `examples/` beside the executable (the container layout), else this checkout's.
+fn default_examples_dir() -> PathBuf {
+    let bundled = std::env::current_exe().ok().and_then(|executable| {
+        executable
+            .parent()
+            .map(|directory| directory.join("examples"))
+    });
+    match bundled {
+        Some(path) if path.is_dir() => path,
+        _ => std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/assets"),
+    }
 }
 
 /// `blenderproc-worker/` beside the executable (the container layout), else this checkout.

@@ -18,7 +18,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    # Set to a published image (e.g. ghcr.io/bobillumine/bop-server:0.1.1) to pull instead of build.
+    # Set to a published image (e.g. ghcr.io/bobillumine/bop-server:0.1.2) to pull instead of build.
     image: ${BOP_SERVER_IMAGE:-bop-server:latest}
     restart: unless-stopped
     # Reaps renderer processes that outlive their parent; the server is not an init.
@@ -38,6 +38,7 @@ services:
       BOP_MAX_SCENES: ${BOP_MAX_SCENES:-100000}
       BOP_STORAGE_CONCURRENCY: ${BOP_STORAGE_CONCURRENCY:-32}
       BOP_LOCAL_RETENTION_DAYS: ${BOP_LOCAL_RETENTION_DAYS:-14}
+      BOP_SEED_EXAMPLES: ${BOP_SEED_EXAMPLES:-true}
       # Unique per server sharing the database, stable across restarts.
       BOP_RUNNER_ID: ${BOP_RUNNER_ID:-bop-server}
       BOP_LOG: ${BOP_LOG:-info}

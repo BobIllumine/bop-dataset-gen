@@ -38,6 +38,9 @@ RUN cd blenderproc-worker && uv sync --frozen \
 COPY --chown=bop:bop tools/blenderproc-worker/blenderproc_worker.py blenderproc-worker/
 
 COPY --from=build /src/target/release/bop-server /src/target/release/bop-gen /opt/bop/
+# Example meshes a new asset library starts with (BOP_SEED_EXAMPLES).
+COPY --chown=bop:bop examples/assets/cube.stl examples/assets/hex_prism.stl \
+    examples/assets/l_bracket.stl examples/assets/textured_cube.glb examples/
 
 # The NVIDIA runtime only injects the Vulkan ICD when "graphics" is requested.
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,graphics,utility \

@@ -15,6 +15,10 @@ use serde_json::Value;
 use tower::ServiceExt as _;
 
 const SMOKE: &str = include_str!("../../../examples/presets/smoke.toml");
+
+/// Held by each test: with `BOP_TEST_DATABASE_URL` the tests share one job
+/// queue, and one test's server would claim the other's job.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 const CUBE: &[u8] = include_bytes!("../../../examples/assets/cube.stl");
 
 async fn send(app: &Router, method: &str, uri: &str, body: Body) -> (StatusCode, Value) {
@@ -36,6 +40,7 @@ async fn send(app: &Router, method: &str, uri: &str, body: Body) -> (StatusCode,
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires a wgpu adapter; set BOP_TEST_DATABASE_URL and BOP_TEST_STORAGE_URL for PostgreSQL and S3"]
 async fn a_submitted_job_is_rendered_validated_exported_and_stored() {
+    let _serial = SERIAL.lock().await;
     let root = tempfile::tempdir().unwrap();
     let data_dir = root.path().display().to_string();
     let settings = bop_server::settings::Settings::from_vars(|name| match name {
@@ -202,6 +207,7 @@ async fn job_state(app: &Router, id: &str) -> Value {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires a wgpu adapter; set BOP_TEST_DATABASE_URL and BOP_TEST_STORAGE_URL for PostgreSQL and S3"]
 async fn another_server_continues_a_job_from_what_storage_holds() {
+    let _serial = SERIAL.lock().await;
     let shared = tempfile::tempdir().unwrap();
     let (app, first) = bop_server::build(shared_server(shared.path(), "first"))
         .await
@@ -292,4 +298,29 @@ async fn another_server_continues_a_job_from_what_storage_holds() {
     assert!(frames >= 40, "expected a frame per scene, found {frames}");
     second.shutdown();
     running.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "set BOP_TEST_DATABASE_URL and BOP_TEST_STORAGE_URL to start against PostgreSQL and S3"]
+async fn servers_starting_together_share_the_database() {
+    let _serial = SERIAL.lock().await;
+    let shared = tempfile::tempdir().unwrap();
+    // Both rebuild the asset index from the same listing at once.
+    let (first, second) = tokio::join!(
+        bop_server::build(shared_server(shared.path(), "first")),
+        bop_server::build(shared_server(shared.path(), "second")),
+    );
+    let (first, second) = (first.unwrap().0, second.unwrap().0);
+    for app in [&first, &second] {
+        let (status, assets) = send(app, "GET", "/api/v1/assets", Body::empty()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            assets
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|asset| asset["path"] == "cube.stl"),
+            "{assets}"
+        );
+    }
 }

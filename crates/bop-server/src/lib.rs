@@ -7,6 +7,7 @@
 pub mod api;
 pub mod auth;
 pub mod db;
+pub mod examples;
 pub mod index;
 pub mod runner;
 pub mod settings;
@@ -34,6 +35,17 @@ pub async fn build(settings: settings::Settings) -> Result<(axum::Router, runner
     let jobs = db::JobStore::connect(&settings.database_url)
         .await
         .map_err(|error| format!("database: {error}"))?;
+    // A new library gets the example meshes the studio's presets use; the
+    // server still starts without them.
+    if settings.seed_examples {
+        match examples::seed(&storage, &settings.examples_dir).await {
+            Ok(copied) if !copied.is_empty() => {
+                tracing::info!(assets = ?copied, "added example assets to the library");
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!("cannot add example assets: {error}"),
+        }
+    }
     // Picks up assets changed in storage directly while the server was down.
     let assets = index::reconcile_assets(&jobs, &storage)
         .await

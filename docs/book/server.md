@@ -59,6 +59,7 @@ the community fork `pgsty/minio`. Any S3-compatible store works in its place.
 | `BOP_KEEP_LOCAL` | `false` | Keep a succeeded job's local copy after storing it. |
 | `BOP_REQUEUE_ON_START` | `true` | At start, queue the jobs this server's previous process left running at once, instead of after their lease runs out. |
 | `BOP_RUNNER_ID` | the host name | This server's name in job leases. Must be unique among servers sharing a database, and stable across restarts for `BOP_REQUEUE_ON_START` to recognize its own jobs. |
+| `BOP_SEED_EXAMPLES` | `true` | Give an asset library that has never had them the example meshes the studio's presets use. See [Example assets](#example-assets). |
 | `BOP_LOCAL_RETENTION_DAYS` | `14` | Delete local copies of failed and cancelled jobs untouched this long, and asset-cache entries of replaced or deleted assets. Resume rebuilds a deleted copy from storage. `0` keeps everything. |
 | `BOP_BLENDERPROC_EXECUTABLE`, `BOP_BLENDERPROC_WORKER` | `blenderproc`, the bundled worker | The only BlenderProc programs a job can run. |
 | `BOP_CORS_ORIGINS` | unset | Comma-separated browser origins, or `*`, allowed to call the API from another host, such as a separately hosted web UI. Unset allows same-origin only. |
@@ -153,6 +154,20 @@ A job is an ordinary run configuration, with these differences:
   server runs.
 - **Output path:** `[run] output_path` is unused; results go to storage.
 
+## Example assets
+
+A new deployment's asset library is not empty: at start, the server copies
+the example meshes it ships, `cube.stl`, `hex_prism.stl`, `l_bracket.stl`,
+and `textured_cube.glb`, into a library that has never received them. The
+studio's smoke, small, medium, and stress presets use them.
+
+- **Once per library:** the marker `.bop/examples-seeded` records the copy,
+  so an example you delete stays deleted. A new bucket or prefix gets them.
+- **Never replacing:** a library file with an example's name is left alone.
+- **Two bins:** the two-bins preset's `cup/cup.glb` and `nippel/nippel.glb`
+  are not shipped; upload them from this repository's `examples/cup_nippel`.
+- **Off:** set `BOP_SEED_EXAMPLES=false`.
+
 ## Storage layout
 
 ```text
@@ -160,6 +175,7 @@ assets/<path>                    uploaded source files
 datasets/<job-id>/...            the canonical dataset (as written by `bop-gen generate`)
 exports/<job-id>/dataset.tar     the dataset, packed when the job finishes
 exports/<job-id>/bop.tar         the BOP export, packed when the job finishes, if requested
+.bop/examples-seeded             marks a library that has received the example assets
 ```
 
 Jobs from earlier versions may also hold `datasets/<job-id>/bop/...`, the

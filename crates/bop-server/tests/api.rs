@@ -23,6 +23,8 @@ async fn app_with(root: &std::path::Path, token: Option<&str>, cors: Option<&str
         "BOP_API_TOKEN" => token.clone(),
         "BOP_MAX_SCENES" => Some("1000".to_owned()),
         "BOP_CORS_ORIGINS" => cors.clone(),
+        // These tests manage the library themselves; seeding has its own.
+        "BOP_SEED_EXAMPLES" => Some("false".to_owned()),
         _ => None,
     })
     .unwrap();
@@ -682,4 +684,81 @@ async fn an_abandoned_export_claim_is_taken_over() {
             size: archive.len() as u64
         })
     );
+}
+
+/// A server on `root` with example seeding at its default.
+async fn seeding_app(root: &std::path::Path) -> Router {
+    let root = root.to_owned();
+    let settings = bop_server::settings::Settings::from_vars(move |name| match name {
+        "BOP_DATA_DIR" => Some(root.display().to_string()),
+        _ => None,
+    })
+    .unwrap();
+    bop_server::build(settings).await.unwrap().0
+}
+
+async fn asset_paths(app: &Router) -> Vec<String> {
+    let (_, assets) = send(app, "GET", "/api/v1/assets", Body::empty()).await;
+    assets
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|asset| asset["path"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+const EXAMPLES: [&str; 4] = [
+    "cube.stl",
+    "hex_prism.stl",
+    "l_bracket.stl",
+    "textured_cube.glb",
+];
+
+#[tokio::test]
+async fn a_new_library_starts_with_the_example_meshes_the_presets_use() {
+    let root = tempfile::tempdir().unwrap();
+    let app = seeding_app(root.path()).await;
+    assert_eq!(asset_paths(&app).await, EXAMPLES);
+    let (_, _, cube) = fetch(&app, "GET", "/api/v1/assets/cube.stl").await;
+    assert_eq!(cube, include_bytes!("../../../examples/assets/cube.stl"));
+
+    // The smoke preset, as the studio ships it, needs nothing uploaded.
+    let smoke = include_str!("../../../examples/presets/smoke.toml")
+        .replace("\"../assets/cube.stl\"", "\"cube.stl\"");
+    let validate = Body::from(serde_json::json!({ "config": smoke }).to_string());
+    let (status, report) = send(&app, "POST", "/api/v1/configs/validate", validate).await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!(report["missing_assets"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn examples_never_replace_library_files_or_return_once_deleted() {
+    let root = tempfile::tempdir().unwrap();
+    let store = storage(root.path());
+    store
+        .put("assets/cube.stl", b"my own cube".to_vec())
+        .await
+        .unwrap();
+    let app = seeding_app(root.path()).await;
+    assert_eq!(asset_paths(&app).await, EXAMPLES);
+    let (_, _, cube) = fetch(&app, "GET", "/api/v1/assets/cube.stl").await;
+    assert_eq!(cube, b"my own cube");
+
+    let (status, _, _) = fetch(&app, "DELETE", "/api/v1/assets/hex_prism.stl").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let app = seeding_app(root.path()).await;
+    assert_eq!(
+        asset_paths(&app).await,
+        ["cube.stl", "l_bracket.stl", "textured_cube.glb"]
+    );
+}
+
+#[tokio::test]
+async fn seeding_can_be_turned_off() {
+    let root = tempfile::tempdir().unwrap();
+    let app = app(root.path(), None).await;
+    assert!(asset_paths(&app).await.is_empty());
+    // A later start with seeding on still gives a never-seeded library the examples.
+    let app = seeding_app(root.path()).await;
+    assert_eq!(asset_paths(&app).await, EXAMPLES);
 }

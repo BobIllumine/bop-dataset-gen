@@ -44,16 +44,16 @@ Released images are published to GitHub Packages, so the machine only needs
 this repository's `deploy/` directory at the release:
 
 ```text
-git clone --branch v0.1.1 https://github.com/BobIllumine/bop-dataset-gen.git
+git clone --branch v0.1.2 https://github.com/BobIllumine/bop-dataset-gen.git
 ```
 
 | Image | |
 | --- | --- |
-| `ghcr.io/bobillumine/bop-server:0.1.1` | linux/amd64, NVIDIA |
-| `ghcr.io/bobillumine/bop-studio:0.1.1` | linux/amd64 and linux/arm64 |
+| `ghcr.io/bobillumine/bop-server:0.1.2` | linux/amd64, NVIDIA |
+| `ghcr.io/bobillumine/bop-studio:0.1.2` | linux/amd64 and linux/arm64 |
 
 To build from source instead, also clone bop-studio next to it
-(`git clone --branch v0.1.1 https://github.com/BobIllumine/bop-studio.git`),
+(`git clone --branch v0.1.2 https://github.com/BobIllumine/bop-studio.git`),
 leave the two `*_IMAGE` variables below unset, and add `--build` in step 6.
 
 ## 3. authentik
@@ -103,7 +103,9 @@ set `BOP_OIDC_JWKS_URL` to the internal JWKS URL in step 5.
   ```
 
 - **Bucket:** create it (the server does not), and an access key limited to
-  it. Results go below an optional prefix.
+  it. Results go below an optional prefix. On first start the server adds the
+  example meshes the studio's presets use; see
+  [Example assets](server.md#example-assets).
 
 Export links are presigned URLs on the bucket's endpoint, so a browser
 downloads an export only where it can reach `AWS_ENDPOINT_URL`.
@@ -135,8 +137,8 @@ BOP_OIDC_GROUPS=bop-users
 #BOP_API_TOKEN=
 
 # The released images.
-BOP_SERVER_IMAGE=ghcr.io/bobillumine/bop-server:0.1.1
-BOP_STUDIO_IMAGE=ghcr.io/bobillumine/bop-studio:0.1.1
+BOP_SERVER_IMAGE=ghcr.io/bobillumine/bop-server:0.1.2
+BOP_STUDIO_IMAGE=ghcr.io/bobillumine/bop-studio:0.1.2
 ```
 
 Leave `BOP_ALLOW_ANONYMOUS`, `BOP_CORS_ORIGINS` and the `*_BIND` variables

@@ -4,9 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.1.2
 
 ### Added
+
+- **Example assets on a new deployment.** A new asset library gets the
+  example meshes the studio's presets use (`cube.stl`, `hex_prism.stl`,
+  `l_bracket.stl`, `textured_cube.glb`), once, without replacing files of the
+  same name; `BOP_SEED_EXAMPLES=false` turns it off. Before, a fresh
+  deployment, particularly on external S3, rejected every preset until the
+  meshes were uploaded by hand.
 
 - **GitHub Packages.** The server image is also published as
   `ghcr.io/bobillumine/bop-server`, and Docker Hub is optional. A manual run

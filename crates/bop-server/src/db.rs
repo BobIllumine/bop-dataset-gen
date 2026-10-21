@@ -667,8 +667,12 @@ impl JobStore {
             .execute(&mut *transaction)
             .await?;
         for batch in assets.chunks(BATCH_ROWS) {
+            // Servers starting together rebuild the index concurrently from
+            // the same listing; an upsert lets them converge instead of failing.
             let sql = format!(
-                "INSERT INTO bop_assets (path, size, etag, updated_at_ms) VALUES {}",
+                "INSERT INTO bop_assets (path, size, etag, updated_at_ms) VALUES {} \
+                 ON CONFLICT (path) DO UPDATE SET size = excluded.size, etag = excluded.etag, \
+                 updated_at_ms = excluded.updated_at_ms",
                 placeholders(batch.len(), 4)
             );
             let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));

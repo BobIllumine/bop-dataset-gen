@@ -309,6 +309,6 @@ fn v1_protocol_matches_the_locked_known_vector() {
     // The key includes this crate's version, so every release changes it.
     assert_eq!(
         digest.to_hex(),
-        "a396c0ca78af6f335a06667da4509fb101ab6dcf90e9670d47d662f2141e889e"
+        "0712c571cc64413840659461fc04847f0fe899a0eac3416e18e17ad7eb93d148"
     );
 }
