@@ -71,7 +71,7 @@ jobs:
              tools/blenderproc-worker/uv.lock "${stage}/blenderproc-worker/"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           (cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bop-gen-${{ matrix.variant }}-${{ matrix.target }}
           path: |
