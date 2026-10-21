@@ -32,8 +32,8 @@ bop-render-blenderproc = { path = "../bop-render-blenderproc", optional = true }
 ctrlc = { version = "=3.5.2", features = ["termination"] }
 serde_json = { version = "1" }
 toml = "1.1.4"
-tracing = "=0.1.41"
-tracing-subscriber = { version = "=0.3.20", default-features = false, features = ["env-filter", "fmt", "json", "std"] }
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["env-filter", "fmt", "json", "std"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "=0.31.3", default-features = false, features = ["resource"] }

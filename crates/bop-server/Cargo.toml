@@ -34,8 +34,8 @@ thiserror = "2"
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "signal", "sync", "fs", "net"] }
 toml = "1.1.4"
 tower-http = { version = "0.6.11", features = ["cors", "set-header"] }
-tracing = "=0.1.41"
-tracing-subscriber = { version = "=0.3.20", default-features = false, features = ["env-filter", "fmt", "json", "std"] }
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["env-filter", "fmt", "json", "std"] }
 utoipa = "6.0.0"
 utoipa-axum = "0.3.0"
 uuid = { version = "1.24", features = ["v4"] }
