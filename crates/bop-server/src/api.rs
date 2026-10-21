@@ -39,7 +39,8 @@ use utoipa_axum::{
 
 use crate::{
     auth::{AuthError, Authenticator},
-    db::{Job, JobState, JobStore, NewJob},
+    db::{AssetRecord, Job, JobState, JobStore, NewJob},
+    index::{self, IndexError},
     runner::{JobEvent, Runner},
     settings::Settings,
     storage::{Storage, StorageError, StoredObject},
@@ -277,6 +278,13 @@ fn storage_failure(source: StorageError) -> Response {
     }
 }
 
+fn index_failure(source: IndexError) -> Response {
+    match source {
+        IndexError::Storage(source) => storage_failure(source),
+        other => internal(other),
+    }
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -392,9 +400,19 @@ async fn server_info(State(state): State<AppState>) -> Json<ServerInfo> {
 #[utoipa::path(get, path = "/assets", tag = "assets",
     responses((status = 200, body = Vec<StoredObject>), (status = 500, body = ApiError)))]
 async fn list_assets(State(state): State<AppState>) -> Response {
-    match state.storage.list("assets").await {
-        Ok(objects) => Json(objects).into_response(),
-        Err(source) => storage_failure(source),
+    match state.jobs.assets().await {
+        Ok(assets) => {
+            let mut objects = assets
+                .into_iter()
+                .map(|asset| StoredObject {
+                    path: asset.path,
+                    size: asset.size,
+                })
+                .collect::<Vec<_>>();
+            objects.sort_by(|left, right| left.path.cmp(&right.path));
+            Json(objects).into_response()
+        }
+        Err(source) => internal(source),
     }
 }
 
@@ -433,13 +451,26 @@ async fn put_asset(
         Ok(key) => key,
         Err(message) => return error(StatusCode::BAD_REQUEST, message),
     };
-    match state
+    let etag = match state
         .storage
         .put(&format!("assets/{key}"), body.to_vec())
         .await
     {
-        Ok(()) => (StatusCode::CREATED, Json(UploadedAsset { path: key })).into_response(),
-        Err(source) => storage_failure(source),
+        Ok(etag) => etag,
+        Err(source) => return storage_failure(source),
+    };
+    let record = AssetRecord {
+        path: key,
+        size: body.len() as u64,
+        etag,
+    };
+    match state.jobs.upsert_asset(&record).await {
+        Ok(()) => (
+            StatusCode::CREATED,
+            Json(UploadedAsset { path: record.path }),
+        )
+            .into_response(),
+        Err(source) => internal(source),
     }
 }
 
@@ -452,6 +483,10 @@ async fn delete_asset(State(state): State<AppState>, Path(path): Path<String>) -
         Ok(key) => key,
         Err(message) => return error(StatusCode::BAD_REQUEST, message),
     };
+    // Unindexed first: a failure in between leaves an object the next start indexes again.
+    if let Err(source) = state.jobs.delete_asset(&key).await {
+        return internal(source);
+    }
     match state.storage.delete(&format!("assets/{key}")).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(source) => storage_failure(source),
@@ -571,12 +606,21 @@ async fn optimize_asset(
     };
     let report = optimized.report;
     let size = optimized.glb.len();
-    if let Err(source) = state
+    let etag = match state
         .storage
         .put(&format!("assets/{output}"), optimized.glb)
         .await
     {
-        return storage_failure(source);
+        Ok(etag) => etag,
+        Err(source) => return storage_failure(source),
+    };
+    let record = AssetRecord {
+        path: output.clone(),
+        size: size as u64,
+        etag,
+    };
+    if let Err(source) = state.jobs.upsert_asset(&record).await {
+        return internal(source);
     }
     let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
     (
@@ -596,16 +640,13 @@ async fn optimize_asset(
 }
 
 /// Asset paths the run reads that are not in the library.
-async fn missing_assets(storage: &Storage, paths: &[String]) -> Result<Vec<String>, Response> {
-    let mut missing = Vec::new();
-    for path in paths {
-        match storage.exists(&format!("assets/{path}")).await {
-            Ok(true) => {}
-            Ok(false) => missing.push(path.clone()),
-            Err(source) => return Err(storage_failure(source)),
-        }
-    }
-    Ok(missing)
+async fn missing_assets(jobs: &JobStore, paths: &[String]) -> Result<Vec<String>, Response> {
+    let present = jobs.present_assets(paths).await.map_err(internal)?;
+    Ok(paths
+        .iter()
+        .filter(|path| !present.contains(*path))
+        .cloned()
+        .collect())
 }
 
 /// A configuration to check.
@@ -639,7 +680,7 @@ async fn validate_config(
         Ok(accepted) => accepted,
         Err(message) => return error(StatusCode::UNPROCESSABLE_ENTITY, message),
     };
-    match missing_assets(&state.storage, &accepted.asset_paths).await {
+    match missing_assets(&state.jobs, &accepted.asset_paths).await {
         Ok(missing) => Json(ConfigReport {
             total_scenes: accepted.total_scenes,
             asset_paths: accepted.asset_paths,
@@ -679,7 +720,7 @@ async fn create_job(State(state): State<AppState>, Json(request): Json<CreateJob
         Ok(accepted) => accepted,
         Err(message) => return error(StatusCode::UNPROCESSABLE_ENTITY, message),
     };
-    match missing_assets(&state.storage, &accepted.asset_paths).await {
+    match missing_assets(&state.jobs, &accepted.asset_paths).await {
         Ok(missing) => {
             if let Some(path) = missing.first() {
                 return error(
@@ -863,9 +904,9 @@ async fn list_job_files(State(state): State<AppState>, Path(id): Path<String>) -
     if let Err(message) = submission::storage_key(std::path::Path::new(&id)) {
         return error(StatusCode::BAD_REQUEST, message);
     }
-    match state.storage.list(&format!("datasets/{id}")).await {
+    match index::job_files(&state.jobs, &state.storage, &id).await {
         Ok(objects) => Json(objects).into_response(),
-        Err(source) => storage_failure(source),
+        Err(source) => index_failure(source),
     }
 }
 
@@ -966,6 +1007,8 @@ async fn succeeded_job(state: &AppState, id: &str) -> Result<Job, Response> {
 
 /// Packs a succeeded job into an uncompressed tar (once; later requests reuse
 /// it) and returns a download link.
+// Jobs pack theirs as they finish; for older jobs the first request packs it,
+// and concurrent requests wait for that one and share its archive.
 #[utoipa::path(post, path = "/jobs/{id}/exports", tag = "exports",
     params(("id" = String, Path, description = "Job identifier.")),
     request_body = CreateExport,
@@ -995,38 +1038,38 @@ async fn create_export(
     if matches!(format, ExportFormat::Bop) && !job.export_bop {
         return error(StatusCode::CONFLICT, "job was submitted without export_bop");
     }
-    let key = format!("exports/{id}/{}.tar", format.name());
-    let file_name = format!("{}-{id}.tar", format.name());
-    let root = file_name.trim_end_matches(".tar");
-    let size = match state.storage.size(&key).await {
-        Ok(Some(size)) => size,
-        Ok(None) => {
-            let packed = match format {
+    let key = index::export_key(&id, format.name());
+    let file_name = format!("{}.tar", index::export_root(&id, format.name()));
+    let pack = {
+        let storage = state.storage.clone();
+        let (id, key) = (id.clone(), key.clone());
+        let root = index::export_root(&id, format.name());
+        // Jobs stored before exports were packed at finalize; newer ones are ready.
+        move || async move {
+            match format {
                 ExportFormat::Dataset => {
-                    state
-                        .storage
+                    storage
                         .pack_tar(
                             &format!("datasets/{id}"),
                             |path| !path.starts_with("bop/"),
-                            root,
+                            &root,
                             &key,
                         )
                         .await
                 }
                 ExportFormat::Bop => {
-                    state
-                        .storage
-                        .pack_tar(&format!("datasets/{id}/bop"), |_| true, root, &key)
+                    storage
+                        .pack_tar(&format!("datasets/{id}/bop"), |_| true, &root, &key)
                         .await
                 }
-            };
-            match packed {
-                Ok(size) => size,
-                Err(source) => return storage_failure(source),
             }
         }
-        Err(source) => return storage_failure(source),
     };
+    let size =
+        match index::ensure_export(&state.jobs, &state.storage, &id, format.name(), pack).await {
+            Ok(size) => size,
+            Err(source) => return index_failure(source),
+        };
     let expires_in = Duration::from_secs(request.expires_in_s);
     let link = match state.storage.signed_get_url(&key, expires_in).await {
         Ok(Some(url)) => ExportLink {

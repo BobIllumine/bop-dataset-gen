@@ -3,10 +3,12 @@
 //! A job generates into `<data_dir>/jobs/<id>/dataset`; each committed scene
 //! is uploaded to `datasets/<id>/` as soon as it is published, and the
 //! remaining files after the run. The local copy is what resume continues
-//! from, so a restarted or resumed job only renders the missing scenes.
+//! from, so a restarted or resumed job only renders the missing scenes, and
+//! only uploads the scenes storage does not hold yet. Finishing packs the
+//! export archives from the local copy.
 
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
@@ -14,11 +16,13 @@ use std::{
 
 use bop_pipeline::CancellationToken;
 use bop_run::{GenerateOptions, LoadedRun};
+use futures::StreamExt as _;
 use serde::Serialize;
 use tokio::sync::{Notify, broadcast, mpsc};
 
 use crate::{
     db::{Job, JobState, JobStore},
+    index,
     settings::Settings,
     storage::Storage,
     submission,
@@ -234,6 +238,7 @@ impl Runner {
 
         job.committed_scenes = count_committed(&dataset);
         self.record_progress(job).await;
+        let mut uploaded = self.stored_scene_files(&job.id).await?;
 
         let (scenes, mut committed) = mpsc::unbounded_channel::<PathBuf>();
         let options = GenerateOptions {
@@ -252,14 +257,18 @@ impl Runner {
                 .map_err(|error| error.to_string())
         });
 
-        let mut uploaded = HashSet::new();
         let mut upload_error = None;
-        while let Some(scene_path) = committed.recv().await {
-            job.committed_scenes += 1;
+        while let Some(first) = committed.recv().await {
+            // Scenes that committed during the last upload go up together.
+            let mut scene_paths = vec![first];
+            while let Ok(scene_path) = committed.try_recv() {
+                scene_paths.push(scene_path);
+            }
+            job.committed_scenes += i64::try_from(scene_paths.len()).unwrap_or(i64::MAX);
             self.record_progress(job).await;
             if upload_error.is_none()
                 && let Err(error) = self
-                    .upload_tree(&job.id, &dataset, &scene_path, &mut uploaded)
+                    .upload_trees(&job.id, &dataset, &scene_paths, &mut uploaded)
                     .await
             {
                 upload_error = Some(error);
@@ -273,8 +282,13 @@ impl Runner {
         }
 
         // Scenes committed before a restart, and the run metadata.
-        self.upload_tree(&job.id, &dataset, &dataset, &mut uploaded)
-            .await?;
+        self.upload_trees(
+            &job.id,
+            &dataset,
+            std::slice::from_ref(&dataset),
+            &mut uploaded,
+        )
+        .await?;
         if report.was_cancelled() {
             return Ok(Outcome::Stopped);
         }
@@ -295,7 +309,8 @@ impl Runner {
         Ok(Outcome::Succeeded)
     }
 
-    /// Validates the dataset, then exports and stores BOP when requested.
+    /// Validates the dataset, then packs and stores its export, and the BOP
+    /// export when requested.
     async fn finalize(&self, job: &Job, work: &Path, dataset: &Path) -> Result<(), String> {
         let root = dataset.to_owned();
         let validation = tokio::task::spawn_blocking(move || bop_dataset::validate_dataset(&root))
@@ -308,6 +323,7 @@ impl Runner {
             files = validation.file_count(),
             "validated dataset"
         );
+        self.store_export(job, "dataset", dataset).await?;
         if !job.export_bop {
             return Ok(());
         }
@@ -324,56 +340,145 @@ impl Runner {
         .await
         .map_err(|error| format!("BOP export task panicked: {error}"))?
         .map_err(|error| format!("BOP export failed: {error}"))?;
-        let mut uploaded = HashSet::new();
-        self.upload_tree(&format!("{}/bop", job.id), &bop, &bop, &mut uploaded)
-            .await
+        // Only the archive is stored; the dataset already holds the same data.
+        self.store_export(job, "bop", &bop).await
     }
 
+    /// Packs every file below `tree` into the job's `format` export archive,
+    /// entry for entry what the export API packs from storage.
+    async fn store_export(&self, job: &Job, format: &str, tree: &Path) -> Result<(), String> {
+        let files = list_files_blocking(tree, &[tree.to_owned()]).await?;
+        let size = self
+            .inner
+            .storage
+            .pack_local_tar(
+                tree,
+                &files,
+                &index::export_root(&job.id, format),
+                &index::export_key(&job.id, format),
+            )
+            .await
+            .map_err(|error| format!("cannot store the {format} export: {error}"))?;
+        self.inner
+            .jobs
+            .set_export_ready(&job.id, format, size)
+            .await
+            .map_err(|error| format!("cannot record the {format} export: {error}"))
+    }
+
+    /// Fetches the run's assets into `project`, several at a time.
     async fn fetch_assets(&self, paths: &[String], project: &Path) -> Result<(), String> {
-        for path in paths {
-            let local = project.join(path);
-            // Kept from an earlier attempt so a resumed run sees the same bytes.
-            if local.is_file() {
-                continue;
-            }
-            self.inner
-                .storage
-                .download(&format!("assets/{path}"), &local)
-                .await
-                .map_err(|error| format!("cannot fetch asset {path}: {error}"))?;
-        }
-        Ok(())
+        let cache = self.inner.settings.asset_cache_dir();
+        // Futures built up front: a mapping closure would make the runner's future not `Send`.
+        let fetches = paths
+            .iter()
+            .map(|path| self.fetch_asset(path, project, &cache))
+            .collect::<Vec<_>>();
+        let outcomes = futures::stream::iter(fetches)
+            .buffer_unordered(self.inner.storage.concurrency())
+            .collect::<Vec<_>>()
+            .await;
+        outcomes.into_iter().collect()
     }
 
-    /// Uploads every file below `tree` not yet in `uploaded`, keyed by its
-    /// path relative to `root` under `datasets/<prefix>/`. Hidden entries
-    /// (the private staging area) are skipped.
-    async fn upload_tree(
-        &self,
-        prefix: &str,
-        root: &Path,
-        tree: &Path,
-        uploaded: &mut HashSet<String>,
-    ) -> Result<(), String> {
-        let (root_owned, tree_owned) = (root.to_owned(), tree.to_owned());
-        let files = tokio::task::spawn_blocking(move || list_files(&root_owned, &tree_owned))
-            .await
-            .map_err(|error| format!("file listing panicked: {error}"))??;
-        for relative in files {
-            if uploaded.contains(&relative) {
-                continue;
-            }
-            self.inner
-                .storage
-                .put_file(
-                    &format!("datasets/{prefix}/{relative}"),
-                    &root.join(&relative),
-                )
-                .await
-                .map_err(|error| format!("cannot store {relative}: {error}"))?;
-            uploaded.insert(relative);
+    /// Links one asset from the shared cache, downloading it there first when
+    /// this version (by entity tag) is not cached yet.
+    async fn fetch_asset(&self, path: &str, project: &Path, cache: &Path) -> Result<(), String> {
+        let local = project.join(path);
+        // Kept from an earlier attempt so a resumed run sees the same bytes.
+        if local.is_file() {
+            return Ok(());
         }
-        Ok(())
+        let fail = |error: &dyn std::fmt::Display| format!("cannot fetch asset {path}: {error}");
+        let key = format!("assets/{path}");
+        let storage = &self.inner.storage;
+        let record = self.inner.jobs.asset(path).await.map_err(|e| fail(&e))?;
+        let Some(cached) = record.and_then(|record| {
+            let etag = record.etag?;
+            Some(cache.join(cache_entry(&etag, record.size)).join(path))
+        }) else {
+            return storage.download(&key, &local).await.map_err(|e| fail(&e));
+        };
+        if !cached.is_file() {
+            storage
+                .download(&key, &cached)
+                .await
+                .map_err(|e| fail(&e))?;
+        }
+        link_or_copy(&cached, &local).await.map_err(|e| fail(&e))
+    }
+
+    /// Scene files an earlier attempt already stored, by path and size. Other
+    /// files are rewritten by every attempt, so they are always uploaded.
+    async fn stored_scene_files(&self, job_id: &str) -> Result<HashMap<String, u64>, String> {
+        let fail = |error: &dyn std::fmt::Display| format!("cannot read stored files: {error}");
+        index::ensure_job_files_indexed(&self.inner.jobs, &self.inner.storage, job_id)
+            .await
+            .map_err(|e| fail(&e))?;
+        Ok(self
+            .inner
+            .jobs
+            .job_files(job_id)
+            .await
+            .map_err(|e| fail(&e))?
+            .into_iter()
+            .filter(|(path, _)| path.starts_with("scenes/"))
+            .collect())
+    }
+
+    /// Uploads every file below `trees` that `uploaded` does not list with its
+    /// current size, keyed by its path relative to `root` under
+    /// `datasets/<job_id>/`, several at a time. Hidden entries (the private
+    /// staging area) are skipped. Whatever was stored is indexed and added to
+    /// `uploaded`, even when another file failed.
+    async fn upload_trees(
+        &self,
+        job_id: &str,
+        root: &Path,
+        trees: &[PathBuf],
+        uploaded: &mut HashMap<String, u64>,
+    ) -> Result<(), String> {
+        let pending = list_files_blocking(root, trees)
+            .await?
+            .into_iter()
+            .filter(|(relative, size)| uploaded.get(relative) != Some(size))
+            .collect::<Vec<_>>();
+        let storage = &self.inner.storage;
+        let uploads = pending
+            .into_iter()
+            .map(|(relative, size)| async move {
+                let stored = storage
+                    .put_file(
+                        &format!("datasets/{job_id}/{relative}"),
+                        &root.join(&relative),
+                    )
+                    .await;
+                (relative, size, stored)
+            })
+            .collect::<Vec<_>>();
+        let results = futures::stream::iter(uploads)
+            .buffer_unordered(storage.concurrency())
+            .collect::<Vec<_>>()
+            .await;
+        let mut stored = Vec::with_capacity(results.len());
+        let mut failure = None;
+        for (relative, size, result) in results {
+            match result {
+                Ok(()) => stored.push((relative, size)),
+                Err(error) => {
+                    failure.get_or_insert_with(|| format!("cannot store {relative}: {error}"));
+                }
+            }
+        }
+        if !stored.is_empty() {
+            self.inner
+                .jobs
+                .record_job_files(job_id, &stored)
+                .await
+                .map_err(|error| format!("cannot index stored files: {error}"))?;
+        }
+        uploaded.extend(stored);
+        failure.map_or(Ok(()), Err)
     }
 
     async fn record_progress(&self, job: &Job) {
@@ -405,8 +510,52 @@ fn count_committed(dataset: &Path) -> i64 {
     })
 }
 
-/// Lists files below `tree` as `/`-separated paths relative to `root`, skipping hidden entries.
-fn list_files(root: &Path, tree: &Path) -> Result<Vec<String>, String> {
+/// Directory name in the asset cache for one version of an asset.
+fn cache_entry(etag: &str, size: u64) -> String {
+    let etag = etag
+        .trim_matches('"')
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("{etag}-{size}")
+}
+
+/// Hard-links `source` to `target`, creating parent directories, or copies it
+/// when they are on different file systems.
+async fn link_or_copy(source: &Path, target: &Path) -> std::io::Result<()> {
+    if let Some(parent) = target.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    if tokio::fs::hard_link(source, target).await.is_ok() {
+        return Ok(());
+    }
+    tokio::fs::copy(source, target).await.map(|_| ())
+}
+
+/// [`list_files`] for each of `trees`, off the async runtime, sorted by path.
+async fn list_files_blocking(root: &Path, trees: &[PathBuf]) -> Result<Vec<(String, u64)>, String> {
+    let (root, trees) = (root.to_owned(), trees.to_vec());
+    tokio::task::spawn_blocking(move || {
+        let mut files = Vec::new();
+        for tree in &trees {
+            files.extend(list_files(&root, tree)?);
+        }
+        files.sort();
+        Ok(files)
+    })
+    .await
+    .map_err(|error| format!("file listing panicked: {error}"))?
+}
+
+/// Lists files below `tree` as `/`-separated paths relative to `root` with
+/// their sizes, sorted by path, skipping hidden entries.
+fn list_files(root: &Path, tree: &Path) -> Result<Vec<(String, u64)>, String> {
     let mut files = Vec::new();
     let mut pending = vec![tree.to_owned()];
     while let Some(directory) = pending.pop() {
@@ -425,6 +574,10 @@ fn list_files(root: &Path, tree: &Path) -> Result<Vec<String>, String> {
             if kind.is_dir() {
                 pending.push(path);
             } else if kind.is_file() {
+                let size = entry
+                    .metadata()
+                    .map_err(|error| format!("cannot stat {}: {error}", path.display()))?
+                    .len();
                 let relative = path
                     .strip_prefix(root)
                     .expect("listed below the root")
@@ -432,7 +585,7 @@ fn list_files(root: &Path, tree: &Path) -> Result<Vec<String>, String> {
                     .map(|part| part.as_os_str().to_string_lossy())
                     .collect::<Vec<_>>()
                     .join("/");
-                files.push(relative);
+                files.push((relative, size));
             }
         }
     }

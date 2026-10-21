@@ -90,12 +90,17 @@ async fn a_submitted_job_is_rendered_validated_exported_and_stored() {
         .iter()
         .map(|file| file["path"].as_str().unwrap())
         .collect::<Vec<_>>();
-    for expected in ["run.json", "resolved-config.toml", "bop/camera.json"] {
+    for expected in ["run.json", "resolved-config.toml"] {
         assert!(
             paths.contains(&expected),
             "{expected} missing from {paths:?}"
         );
     }
+    // The BOP export is stored only as its archive.
+    assert!(
+        !paths.iter().any(|path| path.starts_with("bop/")),
+        "{paths:?}"
+    );
     let frames = paths
         .iter()
         .filter(|path| path.ends_with("/rgb.png"))
@@ -114,6 +119,55 @@ async fn a_submitted_job_is_rendered_validated_exported_and_stored() {
     let png = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     assert!(png.starts_with(b"\x89PNG"));
 
+    assert_exports_ready(&app, &root.path().join("bop.db"), &id).await;
+
     runner.shutdown();
     running.await.unwrap();
+}
+
+/// Both archives were packed as the job finished; their links work at once.
+async fn assert_exports_ready(app: &Router, sqlite: &std::path::Path, id: &str) {
+    for (format, inside) in [("dataset", "run.json"), ("bop", "camera.json")] {
+        let jobs = bop_server::db::JobStore::connect(
+            &std::env::var("BOP_TEST_DATABASE_URL")
+                .unwrap_or_else(|_| format!("sqlite://{}?mode=rwc", sqlite.display())),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                jobs.export(id, format).await.unwrap(),
+                Some(bop_server::db::ExportRecord::Ready { .. })
+            ),
+            "{format} export is not ready"
+        );
+        let body = serde_json::json!({ "format": format }).to_string();
+        let (status, link) = send(
+            app,
+            "POST",
+            &format!("/api/v1/jobs/{id}/exports"),
+            Body::from(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{link}");
+        if link["signed"] == false {
+            let request = Request::builder()
+                .uri(link["url"].as_str().unwrap())
+                .body(Body::empty())
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            let archive = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert_eq!(link["size"], archive.len());
+            let names = tar::Archive::new(archive.as_ref())
+                .entries()
+                .unwrap()
+                .map(|entry| entry.unwrap().path().unwrap().display().to_string())
+                .collect::<Vec<_>>();
+            let expected = format!("{format}-{id}/{inside}");
+            assert!(
+                names.contains(&expected),
+                "{expected} missing from {names:?}"
+            );
+        }
+    }
 }

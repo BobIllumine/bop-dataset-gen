@@ -44,10 +44,11 @@ the community fork `pgsty/minio`. Any S3-compatible store works in its place.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `BOP_LISTEN` | `127.0.0.1:8080` (`0.0.0.0:8080` in the image) | Listen address. |
-| `BOP_DATA_DIR` | `./bop-data` | Job working directories, the convex-decomposition cache, and the default database and storage. |
+| `BOP_DATA_DIR` | `./bop-data` | Job working directories, the convex-decomposition and asset caches, and the default database and storage. |
 | `BOP_DATABASE_URL` | `sqlite://<data>/bop.db?mode=rwc` | `postgres://user:password@host/db` or `sqlite://path`. Tables are created on start. |
 | `BOP_STORAGE_URL` | `file://<data>/storage` | `s3://bucket[/prefix]` or `file:///directory`. The bucket must exist. |
 | `AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` | | S3 connection. MinIO needs `AWS_ENDPOINT_URL`, and `AWS_ALLOW_HTTP=true` without TLS. |
+| `BOP_STORAGE_CONCURRENCY` | `32` | Storage requests a job upload, asset download, or export keeps in flight. Lower it for a small MinIO. |
 | `BOP_API_TOKEN` | unset | A shared token accepted as `Authorization: Bearer <token>`. |
 | `BOP_OIDC_ISSUER`, `BOP_OIDC_CLIENT_ID` | unset | Accept access tokens from this OIDC provider, issued to this client. See [Authentication](#authentication). |
 | `BOP_OIDC_GROUPS` | unset | Comma-separated; a token's `groups` claim must name one. |
@@ -155,16 +156,42 @@ A job is an ordinary run configuration, with these differences:
 ```text
 assets/<path>                    uploaded source files
 datasets/<job-id>/...            the canonical dataset (as written by `bop-gen generate`)
-datasets/<job-id>/bop/...        BOP export, when requested
-exports/<job-id>/<format>.tar    packed downloads, created on first request
+exports/<job-id>/dataset.tar     the dataset, packed when the job finishes
+exports/<job-id>/bop.tar         the BOP export, packed when the job finishes, if requested
 ```
+
+Jobs from earlier versions may also hold `datasets/<job-id>/bop/...`, the
+unpacked BOP export, and get their archives packed on first request.
 
 - **When scenes are uploaded:** each scene is uploaded as soon as it commits,
   so partial results of a running, cancelled, or failed job are readable.
 - **Run metadata:** `run.json`, `resolved-config.toml`, `environment.json`
   and the models follow after the run.
+- **Uploads:** up to `BOP_STORAGE_CONCURRENCY` files at a time; scenes that
+  commit while an upload is in flight go up together next.
 - **Finishing:** before a job succeeds, the dataset is validated as by
-  `bop-gen validate`.
+  `bop-gen validate`, then packed into its export archives from the local
+  copy, so an export link is ready as soon as the job succeeds.
+- **Resume:** scenes storage already holds are not uploaded again; run
+  metadata is, since every attempt rewrites it.
+- **Assets:** a job fetches its assets into `<data>/asset-cache`, keyed by
+  the stored object's entity tag, and links them from there; a replaced
+  asset is fetched again. The cache is not trimmed.
+
+### Storage index
+
+The database keeps an index of storage: the asset library, every job's
+stored files, and the export archives. Asset listings, the missing-asset
+check, job file listings, and export links read it instead of storage.
+
+- **Source of truth:** storage. Rows are written after the object and
+  removed before it.
+- **Rebuilding:** the asset index is rebuilt from a listing at every start,
+  so assets changed in the bucket directly appear after a restart. A job
+  stored by an earlier version is indexed from a listing on first use.
+- **Concurrent exports:** a request for an archive another request is
+  packing waits for it and shares the result. A claim that goes 30 s without
+  progress, as after a crash, is taken over.
 - **Local copy:** the copy under `<data>/jobs/<job-id>` is what resume
   continues from. It is deleted once a job succeeds, unless `BOP_KEEP_LOCAL`
   is set.
@@ -207,7 +234,7 @@ their types from it.
 | `GET /jobs/<id>/events` | Server-sent `job` events: the current state, then every state and progress change. |
 | `GET /jobs/<id>/files` | Stored files below `datasets/<id>/`. |
 | `GET /jobs/<id>/files/<path>` | Streams one stored file. |
-| `POST /jobs/<id>/exports` | `{"format": "dataset" \| "bop", "expires_in_s": 60..604800}`. Packs a succeeded job into an uncompressed tar (once) and returns `{format, url, signed, expires_at_ms, size, file_name}`. |
+| `POST /jobs/<id>/exports` | `{"format": "dataset" \| "bop", "expires_in_s": 60..604800}`. Returns `{format, url, signed, expires_at_ms, size, file_name}` for a succeeded job's uncompressed tar, packing it first for jobs from earlier versions. |
 | `GET /jobs/<id>/exports/<format>.tar` | Streams a packed export, for storage that cannot sign URLs. |
 
 - **Export links:** with S3 storage, `url` is a presigned URL that needs no

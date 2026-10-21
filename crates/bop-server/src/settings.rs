@@ -30,6 +30,9 @@ pub struct Settings {
     pub allow_anonymous: bool,
     /// `BOP_MAX_SCENES`: largest `valid_scene_count` a job may request. Default 100000.
     pub max_scenes: u32,
+    /// `BOP_STORAGE_CONCURRENCY`: storage requests one job upload, download,
+    /// or export keeps in flight. Default 32.
+    pub storage_concurrency: usize,
     /// `BOP_KEEP_LOCAL`: keep a succeeded job's local copy after storing it. Default false.
     pub keep_local: bool,
     /// `BOP_REQUEUE_ON_START`: queue jobs a previous process left running.
@@ -74,6 +77,14 @@ impl Settings {
         let max_scenes = var("BOP_MAX_SCENES")
             .map_or(Ok(100_000), |value| value.parse())
             .map_err(|error| format!("BOP_MAX_SCENES: {error}"))?;
+        let storage_concurrency = match var("BOP_STORAGE_CONCURRENCY") {
+            None => 32,
+            Some(value) => match value.parse::<usize>() {
+                Ok(count) if count > 0 => count,
+                Ok(_) => return Err("BOP_STORAGE_CONCURRENCY must be at least 1".to_owned()),
+                Err(error) => return Err(format!("BOP_STORAGE_CONCURRENCY: {error}")),
+            },
+        };
         let flag = |name: &str, default: bool| match var(name).as_deref() {
             None => Ok(default),
             Some("1" | "true") => Ok(true),
@@ -97,6 +108,7 @@ impl Settings {
             oidc,
             allow_anonymous,
             max_scenes,
+            storage_concurrency,
             keep_local: flag("BOP_KEEP_LOCAL", false)?,
             requeue_on_start: flag("BOP_REQUEUE_ON_START", true)?,
             blenderproc: BlenderProcRuntime {
@@ -123,6 +135,12 @@ impl Settings {
     #[must_use]
     pub fn cache_dir(&self) -> PathBuf {
         self.data_dir.join("cache")
+    }
+
+    /// Downloaded library assets, keyed by entity tag and shared by every job.
+    #[must_use]
+    pub fn asset_cache_dir(&self) -> PathBuf {
+        self.data_dir.join("asset-cache")
     }
 }
 

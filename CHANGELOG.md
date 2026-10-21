@@ -13,6 +13,27 @@ All notable changes to this project are documented here. The format follows
   with a `tag` publishes an existing release again.
 - **Port settings.** `deploy/.env.example` documents `BOP_PORT` and
   `BOP_STUDIO_PORT` for hosts where 8080 or 3000 is taken.
+- **Storage index.** The server's database indexes the asset library, each
+  job's stored files, and its export archives, so asset listings, the
+  missing-asset check, job file listings, and export links no longer wait on
+  storage. Storage stays the source of truth: the asset index is rebuilt at
+  every start, and jobs from earlier versions are indexed on first use.
+- **Asset cache.** Jobs fetch assets into `<data>/asset-cache`, keyed by
+  entity tag, so a job reusing an asset does not download it again.
+- **`BOP_STORAGE_CONCURRENCY`** (default 32): storage requests a job upload,
+  asset download, or export keeps in flight.
+
+### Changed
+
+- **Faster storage transfers.** Result files, assets, and exports of older
+  jobs move several at a time instead of one by one, and a resumed job only
+  uploads the scenes storage does not hold yet.
+- **Exports are packed as jobs finish.** `dataset.tar`, and `bop.tar` for
+  jobs submitted with `export_bop`, are packed from the local copy before a
+  job succeeds, so export links are ready at once. Requests for an archive
+  being packed wait for it instead of packing it again.
+- **The BOP export is stored only as `bop.tar`.** Job file listings no
+  longer include `bop/...`; jobs from earlier versions keep theirs.
 
 ### Fixed
 

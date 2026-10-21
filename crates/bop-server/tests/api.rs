@@ -494,3 +494,192 @@ async fn environment_maps_are_library_assets() {
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
+
+fn storage(root: &std::path::Path) -> bop_server::storage::Storage {
+    bop_server::storage::Storage::from_url(&format!("file://{}/storage", root.display())).unwrap()
+}
+
+fn database_url(root: &std::path::Path) -> String {
+    format!("sqlite://{}?mode=rwc", root.join("bop.db").display())
+}
+
+async fn jobs(root: &std::path::Path) -> bop_server::db::JobStore {
+    bop_server::db::JobStore::connect(&database_url(root))
+        .await
+        .unwrap()
+}
+
+/// Runs one statement against the server's database, as an older server or
+/// a crashed one would have left it.
+async fn execute(root: &std::path::Path, sql: &str) {
+    sqlx::any::install_default_drivers();
+    let pool = sqlx::AnyPool::connect(&database_url(root)).await.unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(sql.to_owned()))
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+}
+
+/// Queues a job for `CONFIG` and returns its identifier.
+async fn queued_job(app: &Router) -> String {
+    for asset in ["cup/cup.glb", "nippel/nippel.glb"] {
+        send(
+            app,
+            "PUT",
+            &format!("/api/v1/assets/{asset}"),
+            Body::from(vec![0_u8; 4]),
+        )
+        .await;
+    }
+    let (status, created) = send(app, "POST", "/api/v1/jobs", job(CONFIG)).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    created["id"].as_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn the_asset_index_is_rebuilt_from_storage_at_every_start() {
+    let root = tempfile::tempdir().unwrap();
+    let app = app(root.path(), None).await;
+    send(&app, "PUT", "/api/v1/assets/cup/cup.glb", Body::from("cup")).await;
+    // Changed behind the server's back: one added, one removed.
+    let store = storage(root.path());
+    store
+        .put("assets/nippel/nippel.glb", b"nippel!".to_vec())
+        .await
+        .unwrap();
+    store.delete("assets/cup/cup.glb").await.unwrap();
+    let (_, assets) = send(&app, "GET", "/api/v1/assets", Body::empty()).await;
+    assert_eq!(
+        assets,
+        serde_json::json!([{ "path": "cup/cup.glb", "size": 3 }])
+    );
+
+    let app = self::app(root.path(), None).await;
+    let (_, assets) = send(&app, "GET", "/api/v1/assets", Body::empty()).await;
+    assert_eq!(
+        assets,
+        serde_json::json!([{ "path": "nippel/nippel.glb", "size": 7 }])
+    );
+    let validate = Body::from(serde_json::json!({ "config": CONFIG }).to_string());
+    let (_, report) = send(&app, "POST", "/api/v1/configs/validate", validate).await;
+    assert_eq!(report["missing_assets"], serde_json::json!(["cup/cup.glb"]));
+
+    let (status, _, _) = fetch(&app, "DELETE", "/api/v1/assets/nippel/nippel.glb").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, assets) = send(&app, "GET", "/api/v1/assets", Body::empty()).await;
+    assert_eq!(assets, serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn files_of_jobs_stored_before_the_index_are_indexed_on_first_listing() {
+    let root = tempfile::tempdir().unwrap();
+    let app = app(root.path(), None).await;
+    let id = queued_job(&app).await;
+    let store = storage(root.path());
+    for path in ["scenes/1/scene.json", "run.json", "scenes/0/scene.json"] {
+        store
+            .put(&format!("datasets/{id}/{path}"), b"{}".to_vec())
+            .await
+            .unwrap();
+    }
+    let files = format!("/api/v1/jobs/{id}/files");
+    // A new job's listing comes from the index, which these writes bypassed.
+    let (_, listed) = send(&app, "GET", &files, Body::empty()).await;
+    assert_eq!(listed, serde_json::json!([]));
+
+    execute(root.path(), "UPDATE bop_jobs SET files_indexed = 0").await;
+    let (status, listed) = send(&app, "GET", &files, Body::empty()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        listed,
+        serde_json::json!([
+            { "path": "run.json", "size": 2 },
+            { "path": "scenes/0/scene.json", "size": 2 },
+            { "path": "scenes/1/scene.json", "size": 2 },
+        ])
+    );
+    assert_eq!(
+        jobs(root.path()).await.files_indexed(&id).await.unwrap(),
+        Some(true)
+    );
+
+    let (status, listed) = send(&app, "GET", "/api/v1/jobs/unknown/files", Body::empty()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listed, serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn export_requests_wait_for_the_one_packing_and_reuse_its_archive() {
+    let root = tempfile::tempdir().unwrap();
+    let app = app(root.path(), None).await;
+    let id = queued_job(&app).await;
+    let jobs = jobs(root.path()).await;
+    jobs.set_state(&id, bop_server::db::JobState::Succeeded, None)
+        .await
+        .unwrap();
+    // Another request (or server) is packing the dataset export.
+    assert!(jobs.claim_export(&id, "dataset").await.unwrap());
+    assert!(!jobs.claim_export(&id, "dataset").await.unwrap());
+
+    let request = {
+        let (app, id) = (app.clone(), id.clone());
+        tokio::spawn(async move {
+            let body = serde_json::json!({ "format": "dataset" }).to_string();
+            send(
+                &app,
+                "POST",
+                &format!("/api/v1/jobs/{id}/exports"),
+                Body::from(body),
+            )
+            .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    assert!(!request.is_finished(), "the request waits for the packer");
+    storage(root.path())
+        .put(&format!("exports/{id}/dataset.tar"), vec![0; 1024])
+        .await
+        .unwrap();
+    jobs.set_export_ready(&id, "dataset", 1024).await.unwrap();
+    let (status, link) = request.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{link}");
+    assert_eq!(link["size"], 1024);
+}
+
+#[tokio::test]
+async fn an_abandoned_export_claim_is_taken_over() {
+    let root = tempfile::tempdir().unwrap();
+    let app = app(root.path(), None).await;
+    let id = queued_job(&app).await;
+    let jobs = jobs(root.path()).await;
+    storage(root.path())
+        .put(&format!("datasets/{id}/run.json"), b"{}".to_vec())
+        .await
+        .unwrap();
+    jobs.set_state(&id, bop_server::db::JobState::Succeeded, None)
+        .await
+        .unwrap();
+    // A packer that crashed long ago.
+    assert!(jobs.claim_export(&id, "dataset").await.unwrap());
+    execute(root.path(), "UPDATE bop_exports SET updated_at_ms = 0").await;
+    assert!(!jobs.take_over_export(&id, "dataset", 1).await.unwrap());
+
+    let body = serde_json::json!({ "format": "dataset" }).to_string();
+    let (status, link) = send(
+        &app,
+        "POST",
+        &format!("/api/v1/jobs/{id}/exports"),
+        Body::from(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{link}");
+    let (_, _, archive) = fetch(&app, "GET", link["url"].as_str().unwrap()).await;
+    assert_eq!(link["size"], archive.len());
+    assert_eq!(
+        jobs.export(&id, "dataset").await.unwrap(),
+        Some(bop_server::db::ExportRecord::Ready {
+            size: archive.len() as u64
+        })
+    );
+}
