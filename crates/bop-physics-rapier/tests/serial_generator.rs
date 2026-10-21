@@ -318,12 +318,11 @@ fn eight_scene_primitive_corpus_is_locked_serializable_and_schedule_independent(
     );
     let expected = match platform.as_str() {
         "aarch64-macos-fast" => "de77cc5af0d60511c8b712b7736120d13687d0c9c934bae9378c9dddb54e630b",
-        "aarch64-macos-reproducible" => {
-            "db281b77f46d9bb8e2806cf67e865547419dc964d6ecc0e299a8a793849197d5"
-        }
         "x86_64-linux-fast" => "a3ebf2b89510d039b9311424875ee1eb942cd4e96d1ab33538eb708e5f6a493e",
-        "x86_64-linux-reproducible" => {
-            "9953d0fdf5f23e16897a7d4929d5257b21ddf93f7651668a0de1e939d9c22198"
+        // Enhanced determinism also puts glam on scalar libm math, so the
+        // reproducible corpus matches across these platforms.
+        "aarch64-macos-reproducible" | "x86_64-linux-reproducible" => {
+            "0b072da5998db58ff3fa52a6c89a885a5e14fbd782701705291ba2f5ccfc0444"
         }
         _ => panic!("no corpus digest is pinned for {platform}; this platform produced {digest}"),
     };

@@ -51,7 +51,9 @@ Known sources of nondeterminism are handled explicitly:
 - **Physics features.** The default `fast` feature uses SIMD Rapier. The
   `reproducible` feature enables Rapier's enhanced determinism, which removes
   Rapier's own run-to-run variation but does not make other float math match
-  across platforms. The two give different output, are mutually exclusive, and
+  across platforms. It also switches the shared glam crate to scalar `libm`
+  math, so glam results (poses, camera rotations) match across platforms in
+  that build, while `std` calls such as `tan` still differ. The two give different output, are mutually exclusive, and
   the enabled feature is recorded in `environment.json`. A test pins an
   eight-scene corpus digest for each feature on each CI platform
   (`crates/bop-physics-rapier/tests/serial_generator.rs`).
