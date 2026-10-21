@@ -63,10 +63,17 @@ fn shell_camera_replays_exactly_and_changes_with_scene_identity() {
     } else {
         "10.392304"
     };
+    // The reproducible feature puts glam on scalar math, which rounds the
+    // look-at quaternion differently from the SIMD path.
+    let rotation = if cfg!(feature = "reproducible") {
+        "0.7473643,-0.5918559,0.18743752,0.23668614"
+    } else {
+        "0.74736434,-0.59185594,0.18743753,0.23668616"
+    };
     assert_eq!(
         serde_json::to_string(&first.cameras()[0]).unwrap(),
         format!(
-            r#"{{"schema_version":1,"camera_id":1,"image_size":{{"width":16,"height":12}},"k":[{focal},0.0,8.0,0.0,{focal},6.0,0.0,0.0,1.0],"camera_from_world":{{"camera_from_world":{{"translation":[-8.940696e-8,0.115130655,1.1363792],"rotation_xyzw":[0.74736434,-0.59185594,0.18743753,0.23668616]}}}},"near_m":0.01,"far_m":10.0}}"#
+            r#"{{"schema_version":1,"camera_id":1,"image_size":{{"width":16,"height":12}},"k":[{focal},0.0,8.0,0.0,{focal},6.0,0.0,0.0,1.0],"camera_from_world":{{"camera_from_world":{{"translation":[-8.940696e-8,0.115130655,1.1363792],"rotation_xyzw":[{rotation}]}}}},"near_m":0.01,"far_m":10.0}}"#
         )
     );
     assert_eq!(first.cameras(), replay.cameras());

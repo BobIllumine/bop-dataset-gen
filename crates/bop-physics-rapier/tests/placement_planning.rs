@@ -221,7 +221,8 @@ fn places_two_objects_with_the_locked_public_pose_vector() {
         .expect("placement succeeds");
     // glam's aarch64 (NEON) and x86_64 (SSE2) paths round one component
     // differently; poses are reproducible per platform (see determinism.md).
-    let rotation_y = if cfg!(target_arch = "aarch64") {
+    // The reproducible feature puts glam on scalar math, which matches aarch64.
+    let rotation_y = if cfg!(any(target_arch = "aarch64", feature = "reproducible")) {
         1_056_521_893
     } else {
         1_056_521_894
