@@ -27,6 +27,7 @@ use std::{
 };
 
 use bop_core::{AssetId, CameraSnapshot, RigidTransform, SceneSnapshot};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -164,17 +165,20 @@ fn write_export(
         image_count: 0,
         ground_truth_count: 0,
     };
+    // Scenes are independent and write disjoint files, so they are exported in
+    // parallel; merging in scene order keeps the report and the first error
+    // the same as a serial export's.
+    let scenes = sorted_children(&dataset_root.join("scenes"))?
+        .par_iter()
+        .map(|scene_dir| write_scene(scene_dir, root, &object_ids, options))
+        .collect::<Vec<_>>();
     let mut cameras = BTreeSet::new();
-    for scene_dir in sorted_children(&dataset_root.join("scenes"))? {
-        write_scene(
-            &scene_dir,
-            root,
-            &object_ids,
-            options,
-            &mut cameras,
-            &mut report,
-        )?;
+    for scene in scenes {
+        let scene = scene?;
         report.scene_count += 1;
+        report.image_count += scene.image_count;
+        report.ground_truth_count += scene.ground_truth_count;
+        cameras.extend(scene.cameras);
     }
     if cameras.len() == 1 {
         let first = scene_camera_of_first_image(root)?;
@@ -203,15 +207,26 @@ fn sorted_children(directory: &Path) -> Result<Vec<PathBuf>, BopExportError> {
     Ok(children)
 }
 
+/// What one exported scene adds to the export.
+struct SceneExport {
+    /// Distinct intrinsics and image sizes, as JSON text.
+    cameras: BTreeSet<String>,
+    image_count: u64,
+    ground_truth_count: u64,
+}
+
 /// Writes one canonical scene as one BOP scene with one image per camera.
 fn write_scene(
     scene_dir: &Path,
     root: &Path,
     object_ids: &BTreeMap<AssetId, u32>,
     options: BopExportOptions,
-    cameras: &mut BTreeSet<String>,
-    report: &mut BopReport,
-) -> Result<(), BopExportError> {
+) -> Result<SceneExport, BopExportError> {
+    let mut export = SceneExport {
+        cameras: BTreeSet::new(),
+        image_count: 0,
+        ground_truth_count: 0,
+    };
     let scene: SceneSnapshot = read_json(&scene_dir.join("scene.json"))?;
     let scene_id = scene.scene_id().get();
     if scene_id > MAX_BOP_SCENE_ID {
@@ -249,7 +264,7 @@ fn write_scene(
                 "cam_t_w2c": translation_w2c,
             }),
         );
-        cameras.insert(
+        export.cameras.insert(
             json!({"k": camera.k().k(), "size": [size.width(), size.height()]}).to_string(),
         );
         let mut ground_truth = Vec::with_capacity(instances.len());
@@ -264,7 +279,7 @@ fn write_scene(
                 "obj_id": obj_id,
             }));
         }
-        report.ground_truth_count += ground_truth.len() as u64;
+        export.ground_truth_count += ground_truth.len() as u64;
         scene_gt.insert(im_id.to_string(), Value::Array(ground_truth));
         scene_gt_bop.insert(
             im_id.to_string(),
@@ -279,11 +294,12 @@ fn write_scene(
                 .collect::<Vec<_>>(),
         );
         write_images(&frame_dir, &out, im_id, size, &instances, options)?;
-        report.image_count += 1;
+        export.image_count += 1;
     }
     write_json(&out.join("scene_camera.json"), &scene_camera)?;
     write_json(&out.join("scene_gt.json"), &scene_gt)?;
-    write_json(&out.join("scene_gt_bop.json"), &scene_gt_bop)
+    write_json(&out.join("scene_gt_bop.json"), &scene_gt_bop)?;
+    Ok(export)
 }
 
 /// Writes the RGB, 16-bit depth, and visible-mask images of one camera.

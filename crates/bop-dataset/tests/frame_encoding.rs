@@ -124,6 +124,8 @@ fn depth_is_written_losslessly_as_single_channel_float_exr() {
     let header = &image.layer_data;
     assert_eq!(header.encoding.compression, Compression::ZIP16);
     assert_eq!(header.encoding.blocks, Blocks::ScanLines);
+    // Parallel compression only stays deterministic in a fixed line order.
+    assert_eq!(header.encoding.line_order, LineOrder::Increasing);
 }
 
 #[test]

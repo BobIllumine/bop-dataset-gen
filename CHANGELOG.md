@@ -49,6 +49,15 @@ All notable changes to this project are documented here. The format follows
 - **`BOP_REQUEUE_ON_START`** now only queues the jobs this server left
   running, so it is safe with several servers.
 - **Run metadata is stored with the first scenes** instead of after the run.
+- **Faster BOP export and validation.** `bop-gen export bop` and dataset
+  validation process scenes in parallel: on 1,000 rendered 640×480 scenes the
+  export takes 3.7 s instead of 22.9 s and validation 0.5 s instead of 3.2 s,
+  with byte-identical output. Together with reading files ahead while packing
+  archives, a server job's finishing step drops from about 31 s to about 5 s.
+- **Faster encoding.** The wgpu renderer encodes a frame's RGB, depth, and
+  instance images concurrently, and depth blocks are compressed in parallel;
+  generation at the presets' 4 renderer workers is about 15% faster, with
+  byte-identical output.
 - **Depth is ZIP-compressed.** `depth.exr` is written as ZIP in 16-scanline
   blocks instead of tiled RLE, which barely compressed float depth: rendered
   depth takes 5–17% of its former size, and wgpu datasets shrink about 7×.

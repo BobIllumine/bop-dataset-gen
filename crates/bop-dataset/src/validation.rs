@@ -7,6 +7,7 @@ use std::{
 
 use bop_core::{CameraSnapshot, RenderSceneRequest, SceneId, SceneSnapshot};
 use exr::prelude::{ReadChannels as _, ReadLayers as _, ReadSpecificChannel as _, read};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -56,7 +57,7 @@ pub fn validate_dataset(root: &Path) -> Result<DatasetValidationReport, DatasetV
     let scenes_root = root.join("scenes");
     let entries = fs::read_dir(&scenes_root).map_err(|source| io_error(&scenes_root, source))?;
     let mut seen = BTreeSet::new();
-    let mut file_count = 0_u64;
+    let mut scenes = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|source| io_error(&scenes_root, source))?;
         let path = entry.path();
@@ -80,8 +81,18 @@ pub fn validate_dataset(root: &Path) -> Result<DatasetValidationReport, DatasetV
         if !seen.insert(scene_id) {
             return Err(DatasetValidationError::InvalidScenePath { path });
         }
+        scenes.push((scene_id, path));
+    }
+    // Scenes are checked in parallel; the first failure in scene order wins.
+    scenes.sort_unstable();
+    let counts = scenes
+        .par_iter()
+        .map(|(scene_id, path)| validate_committed_scene(path, *scene_id))
+        .collect::<Vec<_>>();
+    let mut file_count = 0_u64;
+    for count in counts {
         file_count = file_count
-            .checked_add(validate_committed_scene(&path, scene_id)?)
+            .checked_add(count?)
             .ok_or(DatasetValidationError::CountOverflow)?;
     }
     if seen.len() as u64 != manifest.total_scene_count() {

@@ -1512,36 +1512,7 @@ impl Renderer for WgpuRenderer {
             staging
                 .prepare_camera(camera.camera_id())
                 .map_err(|error| render_io("prepare camera output", &error))?;
-            let size = camera.image_size();
-            if request.required_channels().rgb() {
-                let rgb = frame
-                    .rgba8
-                    .chunks_exact(4)
-                    .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
-                    .collect();
-                RgbFrame::try_new(size.width(), size.height(), rgb)
-                    .map_err(|error| invalid_frame("RGB", error))?
-                    .write_png(
-                        &staging.rgb_path(camera.camera_id()),
-                        request.png_compression(),
-                    )
-                    .map_err(|error| render_encoding("RGB PNG", &error))?;
-            }
-            if request.required_channels().depth() {
-                DepthFrame::try_new(size.width(), size.height(), frame.depth)
-                    .map_err(|error| invalid_frame("depth", error))?
-                    .write_exr(&staging.depth_path(camera.camera_id()))
-                    .map_err(|error| render_encoding("depth EXR", &error))?;
-            }
-            if request.required_channels().instance() {
-                InstanceFrame::try_new(size.width(), size.height(), frame.instance)
-                    .map_err(|error| invalid_frame("instance", error))?
-                    .write_png(
-                        &staging.instance_path(camera.camera_id()),
-                        request.png_compression(),
-                    )
-                    .map_err(|error| render_encoding("instance PNG", &error))?;
-            }
+            encode_frame(staging, request, camera, frame)?;
         }
         let encode_seconds = checked_duration(encode_started.elapsed())?;
         let zero = NonNegativeFinite::try_new(0.0).map_err(|error| RenderError::Internal {
@@ -1587,6 +1558,62 @@ fn checked_duration(duration: Duration) -> Result<NonNegativeFinite, RenderError
     NonNegativeFinite::try_new(duration.as_secs_f32()).map_err(|error| RenderError::Internal {
         message: error.to_string(),
     })
+}
+
+/// Encodes one camera's rendered channels into the staging area. The channels
+/// are separate files, so they are encoded concurrently; errors are still
+/// reported in the order RGB, depth, instance.
+fn encode_frame(
+    staging: &SceneStagingArea,
+    request: &RenderSceneRequest,
+    camera: CameraSnapshot,
+    frame: ReadbackFrame,
+) -> Result<(), RenderError> {
+    let size = camera.image_size();
+    let channels = request.required_channels();
+    let (rgb, depth, instance) = std::thread::scope(|scope| {
+        let depth = scope.spawn(|| {
+            channels.depth().then(|| {
+                DepthFrame::try_new(size.width(), size.height(), frame.depth)
+                    .map_err(|error| invalid_frame("depth", error))?
+                    .write_exr(&staging.depth_path(camera.camera_id()))
+                    .map_err(|error| render_encoding("depth EXR", &error))
+            })
+        });
+        let instance = scope.spawn(|| {
+            channels.instance().then(|| {
+                InstanceFrame::try_new(size.width(), size.height(), frame.instance)
+                    .map_err(|error| invalid_frame("instance", error))?
+                    .write_png(
+                        &staging.instance_path(camera.camera_id()),
+                        request.png_compression(),
+                    )
+                    .map_err(|error| render_encoding("instance PNG", &error))
+            })
+        });
+        let rgb = channels.rgb().then(|| {
+            let rgb = frame
+                .rgba8
+                .chunks_exact(4)
+                .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
+                .collect();
+            RgbFrame::try_new(size.width(), size.height(), rgb)
+                .map_err(|error| invalid_frame("RGB", error))?
+                .write_png(
+                    &staging.rgb_path(camera.camera_id()),
+                    request.png_compression(),
+                )
+                .map_err(|error| render_encoding("RGB PNG", &error))
+        });
+        (rgb, depth.join(), instance.join())
+    });
+    let panicked = |channel: &str| RenderError::Internal {
+        message: format!("the {channel} encoder panicked"),
+    };
+    rgb.transpose()?;
+    depth.map_err(|_| panicked("depth"))?.transpose()?;
+    instance.map_err(|_| panicked("instance"))?.transpose()?;
+    Ok(())
 }
 
 fn render_io(operation: &str, error: &std::io::Error) -> RenderError {

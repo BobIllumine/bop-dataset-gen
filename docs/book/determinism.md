@@ -57,9 +57,10 @@ Known sources of nondeterminism are handled explicitly:
   the enabled feature is recorded in `environment.json`. A test pins an
   eight-scene corpus digest for each feature on each CI platform
   (`crates/bop-physics-rapier/tests/serial_generator.rs`).
-- **Depth EXR.** The EXR writer encodes sequentially. Its default parallel mode
-  writes compressed chunks in completion order, which changes the file bytes
-  between runs even though the pixels match.
+- **Depth EXR.** Blocks are compressed in parallel and written in increasing
+  line order, which the EXR writer enforces by reordering them. With an
+  unspecified line order it would write them in completion order, changing
+  the file bytes between runs even though the pixels match.
 - **JSON.** Metadata is serialized from typed structures with stable field
   order and no timestamps.
 

@@ -236,26 +236,55 @@ impl Storage {
         key: &str,
     ) -> Result<u64, StorageError> {
         let mut tar = TarUpload::start(self.store.as_ref(), key).await?;
-        let filled = async {
-            for (path, size) in files {
+        // Files up to the multipart threshold are read ahead, several at a
+        // time; larger ones are streamed when their turn comes. Futures built
+        // up front: a mapping closure would make callers' futures not `Send`.
+        let reads = files
+            .iter()
+            .map(|(path, size)| {
                 let local = local_root.join(path);
-                let mut file = open(&local).await?.take(*size);
+                async move {
+                    if *size > MULTIPART_THRESHOLD {
+                        return Ok(None);
+                    }
+                    tokio::fs::read(&local)
+                        .await
+                        .map(Some)
+                        .map_err(|source| io_error(&local, source))
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut prefetched = futures::stream::iter(reads)
+            .buffered(self.concurrency)
+            .zip(futures::stream::iter(files));
+        let filled = async {
+            while let Some((ahead, (path, size))) = prefetched.next().await {
+                let local = local_root.join(path);
+                let ahead = ahead?;
                 tar.begin(&format!("{root}/{path}"), *size).await?;
                 let mut read = 0;
-                loop {
-                    let chunk = read_chunk(&mut file, &local).await?;
-                    if chunk.is_empty() {
-                        break;
+                if let Some(bytes) = ahead {
+                    read = bytes.len() as u64;
+                    if read == *size {
+                        tar.data(bytes.into()).await?;
                     }
-                    read += chunk.len() as u64;
-                    tar.data(chunk.into()).await?;
+                } else {
+                    let mut file = open(&local).await?.take(*size);
+                    loop {
+                        let chunk = read_chunk(&mut file, &local).await?;
+                        if chunk.is_empty() {
+                            break;
+                        }
+                        read += chunk.len() as u64;
+                        tar.data(chunk.into()).await?;
+                    }
                 }
                 if read != *size {
                     return Err(io_error(
                         &local,
                         std::io::Error::new(
                             std::io::ErrorKind::UnexpectedEof,
-                            "file shrank while packing",
+                            "file changed size while packing",
                         ),
                     ));
                 }
@@ -269,10 +298,11 @@ impl Storage {
 
     /// Stores `bytes` at `key`, replacing any existing object.
     ///
+    /// Returns the stored object's entity tag, when the store reports one.
+    ///
     /// # Errors
     ///
     /// Returns the store failure.
-    /// Returns the stored object's entity tag, when the store reports one.
     pub async fn put(&self, key: &str, bytes: Vec<u8>) -> Result<Option<String>, StorageError> {
         Ok(self
             .store
@@ -611,6 +641,11 @@ mod tests {
             ("scenes/0/frames/1/depth.exr", vec![7; 513]),
             ("scenes/0/scene.json", vec![]),
             (long.as_str(), vec![1; 1024]),
+            // Above the read-ahead limit, so streamed in chunks.
+            (
+                "scenes/0/large.bin",
+                (0..=250_u8).cycle().take(9 * 1024 * 1024).collect(),
+            ),
         ];
         let mut listed = Vec::new();
         for (path, bytes) in &files {
