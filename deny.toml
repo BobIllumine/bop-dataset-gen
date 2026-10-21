@@ -3,6 +3,11 @@ all-features = true
 
 [advisories]
 yanked = "deny"
+ignore = [
+    # paste is a build-time macro pulled in by exr -> pulp. It is archived,
+    # not vulnerable, and no maintained release of exr avoids it.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained build-time macro via exr -> pulp" },
+]
 
 [licenses]
 version = 2
