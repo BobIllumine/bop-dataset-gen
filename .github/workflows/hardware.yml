@@ -67,7 +67,7 @@ jobs:
         working-directory: tools/blenderproc-worker
         run: uv sync --locked --python 3.11
       # BlenderProc downloads Blender itself on first run.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/blender
           key: blender-${{ runner.os }}-${{ hashFiles('tools/blenderproc-worker/uv.lock') }}
