@@ -15,7 +15,8 @@ trees, and the dataset layer validates and atomically publishes complete scenes.
 The implementation is intentionally split into renderer-neutral crates. The
 developer guide in [`docs/book`](docs/book/SUMMARY.md) covers the architecture,
 configuration, determinism, concurrency, storage, renderers, and the CLI.
-Build it with `mdbook build docs` (output in `target/book`).
+Build it with `mdbook build docs` (output in `target/book`). The guide and the
+code reference are published at <https://bobillumine.github.io/bop-dataset-gen/>.
 
 Generate, validate, and export the eight-scene smoke preset:
 

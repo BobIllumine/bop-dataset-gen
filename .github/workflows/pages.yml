@@ -1,0 +1,80 @@
+name: Documentation site
+
+# Publishes the developer guide (mdBook) at the site root and the code
+# reference (rustdoc, private items included) under /api/ to GitHub Pages.
+#
+# One-time setup: Settings -> Pages -> Build and deployment -> Source:
+# "GitHub Actions".
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - docs/**
+      - crates/**
+      - xtask/**
+      - Cargo.lock
+      - Cargo.toml
+      - rust-toolchain.toml
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: Build site
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook@0.5.4
+      - run: mdbook build docs
+      - run: cargo doc --workspace --no-deps --locked --document-private-items
+      - name: Assemble site
+        run: |
+          mkdir -p target/site
+          cp -R target/book/. target/site/
+          cp -R target/doc target/site/api
+          {
+            echo '<!doctype html><meta charset="utf-8"><title>bop-dataset-gen code reference</title>'
+            echo '<h1>Code reference</h1><ul>'
+            for dir in target/site/api/*/; do
+              crate=$(basename "$dir")
+              [ -f "$dir/index.html" ] || continue
+              case "$crate" in src|static.files|trait.impl|type.impl) continue ;; esac
+              echo "<li><a href=\"$crate/index.html\">$crate</a></li>"
+            done
+            echo '</ul><p><a href="../">Developer guide</a></p>'
+          } > target/site/api/index.html
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/site
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -6,3 +6,8 @@ src = "book"
 [build]
 build-dir = "../target/book"
 create-missing = false
+
+[output.html]
+site-url = "/bop-dataset-gen/"
+git-repository-url = "https://github.com/BobIllumine/bop-dataset-gen"
+edit-url-template = "https://github.com/BobIllumine/bop-dataset-gen/edit/master/docs/{path}"

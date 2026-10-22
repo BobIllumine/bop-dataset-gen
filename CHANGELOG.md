@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **Documentation site.** The developer guide and the code reference
+  (rustdoc) are published to <https://bobillumine.github.io/bop-dataset-gen/>
+  on every push to `master` that changes them.
+
 ## 0.1.3
 
 ### Added

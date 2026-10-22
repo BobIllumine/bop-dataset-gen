@@ -35,3 +35,8 @@ cargo test -p bop-cli --bin bop-gen -- --ignored real_wgpu_generate_cli
 Start with [Architecture](architecture.md) for how the crates fit together,
 then [Determinism and seeds](determinism.md) and [Concurrency](concurrency.md),
 which explain the guarantees above.
+
+The [code reference](api/index.html) is the rustdoc of every crate, private
+items included. It is published with this guide at
+<https://bobillumine.github.io/bop-dataset-gen/>; locally, build it with
+`cargo doc --workspace --no-deps --document-private-items --open`.
