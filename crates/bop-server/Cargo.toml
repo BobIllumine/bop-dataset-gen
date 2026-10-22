@@ -22,7 +22,9 @@ bop-core = { path = "../bop-core" }
 bop-dataset = { path = "../bop-dataset" }
 bop-pipeline = { path = "../bop-pipeline", default-features = false }
 bop-run = { path = "../bop-run", default-features = false }
+exr = "=1.74.2"
 futures = "0.3"
+image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png"] }
 jsonwebtoken = { version = "11.1.0", default-features = false, features = ["aws_lc_rs"] }
 object_store = { version = "0.14.2", features = ["aws"] }
 reqwest = { version = "0.13", features = ["json"] }

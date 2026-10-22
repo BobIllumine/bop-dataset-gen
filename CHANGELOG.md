@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **Frame previews.** `GET /jobs/<id>/previews/<path>?size=N` returns a frame
+  scaled to fit `N` pixels, with depth and instance IDs already coloured: a
+  1024×1024 frame's RGB preview at 512 px is about 7% of the PNG and its
+  depth preview about 12% of the EXR. The studio's dataset preview shows
+  these, and fetches a stored depth file only when you hover a frame for
+  exact values.
+
+### Changed
+
+- **Stored files are cacheable.** Committed scene files are sent as
+  immutable, so a browser keeps them; other job files and assets carry an
+  `ETag` and a matching `If-None-Match` gets 304 instead of the file.
+
 ## 0.1.2
 
 ### Added

@@ -9,6 +9,7 @@ pub mod auth;
 pub mod db;
 pub mod examples;
 pub mod index;
+pub mod previews;
 pub mod runner;
 pub mod settings;
 pub mod storage;

@@ -14,7 +14,7 @@ use axum::{
     Json, Router,
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, Path, Query, Request, State},
-    http::{HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{
         IntoResponse, Response,
@@ -41,6 +41,7 @@ use crate::{
     auth::{AuthError, Authenticator},
     db::{AssetRecord, Job, JobState, JobStore, NewJob},
     index::{self, IndexError},
+    previews,
     runner::{JobEvent, Runner},
     settings::Settings,
     storage::{Storage, StorageError, StoredObject},
@@ -131,6 +132,7 @@ fn api() -> OpenApiRouter<AppState> {
         .routes(routes!(job_events))
         .routes(routes!(list_job_files))
         .routes(routes!(get_job_file))
+        .routes(routes!(get_job_preview))
         .routes(routes!(create_export))
         .routes(routes!(get_export))
 }
@@ -293,8 +295,67 @@ fn now_ms() -> i64 {
         })
 }
 
-/// Streams a stored object with a content type chosen by its extension.
-async fn stream_object(storage: &Storage, key: &str, disposition: Option<String>) -> Response {
+/// How a browser may cache a stored object.
+#[derive(Clone, Copy)]
+enum Caching {
+    /// It never changes once stored: keep it without asking again.
+    Immutable,
+    /// It may be replaced: keep it, but revalidate with its entity tag.
+    Revalidate,
+}
+
+impl Caching {
+    const fn header(self) -> &'static str {
+        match self {
+            Self::Immutable => "private, max-age=31536000, immutable",
+            Self::Revalidate => "private, no-cache",
+        }
+    }
+}
+
+/// A store's entity tag as an HTTP `ETag`, which is always quoted.
+fn http_etag(etag: &str) -> String {
+    format!("\"{}\"", etag.trim_start_matches("W/").trim_matches('"'))
+}
+
+/// Whether an `If-None-Match` header names `etag`.
+fn names_etag(if_none_match: &str, etag: &str) -> bool {
+    let etag = http_etag(etag);
+    if_none_match
+        .split(',')
+        .map(str::trim)
+        .any(|candidate| candidate == "*" || http_etag(candidate) == etag)
+}
+
+/// Streams a stored object with a content type chosen by its extension,
+/// answering 304 when the request's `If-None-Match` names its entity tag.
+async fn stream_object(
+    storage: &Storage,
+    key: &str,
+    disposition: Option<String>,
+    caching: Caching,
+    request: &HeaderMap,
+) -> Response {
+    let cache_control = (
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(caching.header()),
+    );
+    if let Some(wanted) = request
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+    {
+        match storage.etag(key).await {
+            Ok(Some(etag)) if names_etag(wanted, &etag) => {
+                let mut response = (StatusCode::NOT_MODIFIED, [cache_control]).into_response();
+                if let Ok(value) = HeaderValue::from_str(&http_etag(&etag)) {
+                    response.headers_mut().insert(header::ETAG, value);
+                }
+                return response;
+            }
+            Ok(_) => {}
+            Err(source) => return storage_failure(source),
+        }
+    }
     match storage.get(key).await {
         Ok(result) => {
             let content_type = match key.rsplit_once('.').map(|(_, extension)| extension) {
@@ -308,12 +369,23 @@ async fn stream_object(storage: &Storage, key: &str, disposition: Option<String>
                 Some("tar") => "application/x-tar",
                 _ => "application/octet-stream",
             };
+            let etag = result
+                .meta
+                .e_tag
+                .as_deref()
+                .and_then(|etag| HeaderValue::from_str(&http_etag(etag)).ok());
             let body = Body::from_stream(result.into_stream().map_err(std::io::Error::other));
             let mut response = (
-                [(header::CONTENT_TYPE, HeaderValue::from_static(content_type))],
+                [
+                    (header::CONTENT_TYPE, HeaderValue::from_static(content_type)),
+                    cache_control,
+                ],
                 body,
             )
                 .into_response();
+            if let Some(etag) = etag {
+                response.headers_mut().insert(header::ETAG, etag);
+            }
             if let Some(value) = disposition.and_then(|value| HeaderValue::from_str(&value).ok()) {
                 response
                     .headers_mut()
@@ -422,12 +494,24 @@ async fn list_assets(State(state): State<AppState>) -> Response {
     responses(
         (status = 200, description = "The file.", content_type = "application/octet-stream", body = Vec<u8>),
         (status = 400, body = ApiError), (status = 404, body = ApiError)))]
-async fn get_asset(State(state): State<AppState>, Path(path): Path<String>) -> Response {
+async fn get_asset(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+    request: HeaderMap,
+) -> Response {
     let key = match submission::storage_key(std::path::Path::new(&path)) {
         Ok(key) => key,
         Err(message) => return error(StatusCode::BAD_REQUEST, message),
     };
-    stream_object(&state.storage, &format!("assets/{key}"), None).await
+    // An asset can be replaced under the same path.
+    stream_object(
+        &state.storage,
+        &format!("assets/{key}"),
+        None,
+        Caching::Revalidate,
+        &request,
+    )
+    .await
 }
 
 /// An uploaded asset's library path.
@@ -922,12 +1006,96 @@ async fn list_job_files(State(state): State<AppState>, Path(id): Path<String>) -
 async fn get_job_file(
     State(state): State<AppState>,
     Path((id, path)): Path<(String, String)>,
+    request: HeaderMap,
 ) -> Response {
     let key = match submission::storage_key(&std::path::Path::new(&id).join(&path)) {
         Ok(key) => key,
         Err(message) => return error(StatusCode::BAD_REQUEST, message),
     };
-    stream_object(&state.storage, &format!("datasets/{key}"), None).await
+    // Committed scenes are written once; other files may be written again by
+    // a later attempt.
+    let caching = if path.starts_with("scenes/") {
+        Caching::Immutable
+    } else {
+        Caching::Revalidate
+    };
+    stream_object(
+        &state.storage,
+        &format!("datasets/{key}"),
+        None,
+        caching,
+        &request,
+    )
+    .await
+}
+
+/// The size of a preview.
+#[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+struct PreviewQuery {
+    /// Longest edge in pixels, 16 to 4096; default 512. A smaller frame keeps its size.
+    size: Option<u32>,
+}
+
+/// Downloads a small image of a stored frame: its `rgb.png`, `depth.exr`, or
+/// `instance.png` scaled to fit `size`, with depth and instance IDs coloured
+/// as the studio colours them. RGB and depth previews are JPEG, instance
+/// previews PNG.
+#[utoipa::path(get, path = "/jobs/{id}/previews/{*path}", tag = "jobs",
+    params(
+        ("id" = String, Path, description = "Job identifier."),
+        ("path" = String, Path, description = "The frame file's path as `/files` lists it."),
+        PreviewQuery),
+    responses(
+        (status = 200, description = "The preview.", content_type = "image/jpeg", body = Vec<u8>),
+        (status = 400, body = ApiError), (status = 404, body = ApiError), (status = 422, body = ApiError)))]
+async fn get_job_preview(
+    State(state): State<AppState>,
+    Path((id, path)): Path<(String, String)>,
+    Query(query): Query<PreviewQuery>,
+) -> Response {
+    let key = match submission::storage_key(&std::path::Path::new(&id).join(&path)) {
+        Ok(key) => key,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    let Some(file) = previews::FrameFile::of(&path) else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "previews exist for a scene frame's rgb.png, depth.exr, or instance.png",
+        );
+    };
+    let size = query.size.unwrap_or(previews::DEFAULT_SIZE);
+    if !previews::SIZES.contains(&size) {
+        return error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "size must be between {} and {}",
+                previews::SIZES.start(),
+                previews::SIZES.end()
+            ),
+        );
+    }
+    let stored = match state.storage.get(&format!("datasets/{key}")).await {
+        Ok(result) => match result.bytes().await {
+            Ok(bytes) => bytes,
+            Err(source) => return storage_failure(source.into()),
+        },
+        Err(source) => return storage_failure(source),
+    };
+    match tokio::task::spawn_blocking(move || previews::render(file, &stored, size)).await {
+        // The frame never changes; a day bounds how long a changed preview
+        // style takes to show.
+        Ok(Ok(preview)) => (
+            [
+                (header::CONTENT_TYPE, preview.content_type),
+                (header::CACHE_CONTROL, "private, max-age=86400"),
+            ],
+            preview.bytes,
+        )
+            .into_response(),
+        Ok(Err(source)) => error(StatusCode::UNPROCESSABLE_ENTITY, source.to_string()),
+        Err(source) => internal(source),
+    }
 }
 
 /// What an export archive holds.
@@ -1107,6 +1275,7 @@ async fn create_export(
 async fn get_export(
     State(state): State<AppState>,
     Path((id, file)): Path<(String, String)>,
+    request: HeaderMap,
 ) -> Response {
     let Some(format) = ExportFormat::from_file(&file) else {
         return error(StatusCode::NOT_FOUND, "no such export");
@@ -1121,6 +1290,8 @@ async fn get_export(
             "attachment; filename=\"{}-{id}.tar\"",
             format.name()
         )),
+        Caching::Revalidate,
+        &request,
     )
     .await
 }
