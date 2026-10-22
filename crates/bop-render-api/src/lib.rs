@@ -2,6 +2,12 @@
 //!
 //! This crate sits above `bop-assets` and `bop-dataset`, so the trait names the
 //! concrete asset catalog and staging area instead of abstracting over them.
+//!
+//! A renderer receives immutable requests, writes frames only into the staging
+//! area it is given and only through the `bop-dataset` encoders, and never
+//! falls back to another backend on its own.
+//!
+//! Guide: <https://bobillumine.github.io/bop-dataset-gen/contributing/renderer-backends.html>
 
 use bop_assets::ResolvedAssetCatalog;
 use bop_core::{BackendInfo, RenderError, RenderReport, RenderSceneRequest, RendererCapabilities};

@@ -1,4 +1,12 @@
 //! Headless wgpu renderer implementation.
+//!
+//! [`WgpuRenderer`] owns one device, its pipelines, and the uploaded asset
+//! catalog, and implements `bop_render_api::Renderer`. This file holds device
+//! and adapter selection, catalog preparation, and the per-camera pass
+//! sequence; the modules hold pipelines and shaders, geometry, textures,
+//! environment maps, and readback.
+//!
+//! Guide: <https://bobillumine.github.io/bop-dataset-gen/contributing/renderer-backends.html>
 
 use std::collections::{BTreeMap, VecDeque};
 use std::{

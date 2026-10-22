@@ -1,4 +1,20 @@
 //! Bounded orchestration for physics, rendering, and dataset commits.
+//!
+//! This crate composes the stages; it implements none of them. Physics comes
+//! from `bop-physics-rapier`, rendering from any [`Renderer`], and every file
+//! format from `bop-dataset`. It never names a concrete renderer backend.
+//!
+//! Each combination of stages exists twice. The serial types
+//! ([`SerialGenerationPipeline`], [`SerialSnapshotSimulator`],
+//! [`SerialSnapshotRenderer`]) are the reference; the parallel types
+//! ([`ParallelGenerationPipeline`], [`ParallelSnapshotSimulator`],
+//! [`ParallelSnapshotRenderer`]) must produce the same bytes.
+//!
+//! Start reading at [`SerialDatasetRenderer::render_and_commit`], the
+//! transaction around one scene that every pipeline uses, then
+//! [`ParallelGenerationPipeline::run_until_cancelled`].
+//!
+//! Guide: <https://bobillumine.github.io/bop-dataset-gen/contributing/pipeline.html>
 
 mod asset_preparation;
 mod bench_report;

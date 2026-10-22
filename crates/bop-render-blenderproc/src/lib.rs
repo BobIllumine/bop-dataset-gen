@@ -1,4 +1,13 @@
 //! Persistent, versioned `BlenderProc` worker supervision.
+//!
+//! [`BlenderProcRenderer`] starts one external worker process
+//! (`tools/blenderproc-worker/blenderproc_worker.py`), speaks a line-based
+//! JSON protocol with it ([`WorkerMessage`], [`WorkerReply`]), restarts it once
+//! if it dies mid-scene, and encodes the raw buffers it writes with the shared
+//! `bop-dataset` encoders. A protocol change must change both sides and the
+//! protocol version together.
+//!
+//! Guide: <https://bobillumine.github.io/bop-dataset-gen/contributing/renderer-backends.html>
 
 use std::{
     collections::{BTreeMap, VecDeque},

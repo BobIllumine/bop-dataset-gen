@@ -1,0 +1,32 @@
+name: Bug
+description: Something does not work, or works worse than it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What happened, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: Commands, configuration, or API calls. Attach logs (`BOP_LOG=debug` for the server, `bop-gen --log-format json ...` for the command line) if you have them.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Version (the release or server image tag, or `generator_version` in a dataset's `environment.json`), OS, GPU, and for the server the database and storage in use.
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: A check anyone can repeat that shows it is fixed.
+    validations:
+      required: true

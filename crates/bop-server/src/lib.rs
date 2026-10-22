@@ -2,7 +2,15 @@
 //!
 //! Jobs are recorded in `SQLite` or `PostgreSQL`, run one at a time on this
 //! machine's renderer, and stored in an S3-compatible bucket or a local
-//! directory. See `docs/book/server.md`.
+//! directory. Generation runs through `bop-run`, exactly as on the command
+//! line; this crate adds authentication, persistence, leases between
+//! servers, uploads, and exports.
+//!
+//! Start reading at [`build`], then [`runner::Runner::run`].
+//!
+//! Guides: <https://bobillumine.github.io/bop-dataset-gen/server.html> (operating it)
+//! and <https://bobillumine.github.io/bop-dataset-gen/contributing/server.html>
+//! (how it is built).
 
 pub mod api;
 pub mod auth;

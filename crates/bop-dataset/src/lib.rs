@@ -1,4 +1,16 @@
 //! Canonical dataset storage, validation, resume, and export.
+//!
+//! Every byte the generator writes is encoded and checked here: the frame
+//! encoders ([`RgbFrame`], [`DepthFrame`], [`InstanceFrame`]), staging and
+//! atomic commit ([`SceneStagingArea`]), the run manifest and resume
+//! ([`DatasetManifest`], [`DatasetResumeIndex`]), validation, snapshot
+//! corpora, and the BOP export. This crate knows nothing of physics,
+//! renderers, or the server.
+//!
+//! A scene reaches `scenes/` only through [`SceneStagingArea::commit`], which
+//! makes its files durable and then renames the whole directory into place.
+//!
+//! Guide: <https://bobillumine.github.io/bop-dataset-gen/contributing/dataset.html>
 
 mod bop;
 mod durability;

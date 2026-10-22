@@ -1,4 +1,11 @@
 //! Run loading and end-to-end generation shared by the command line and the job server.
+//!
+//! This is the one place that names concrete renderer backends. [`generate`]
+//! builds one renderer per configured render worker and picks the serial or
+//! parallel pipeline, so the command line and the server always run a job the
+//! same way. Backends are behind the `wgpu` and `blenderproc` features.
+//!
+//! Guide: <https://bobillumine.github.io/bop-dataset-gen/contributing/run-and-cli.html>
 
 use std::path::{Path, PathBuf};
 

@@ -1,4 +1,14 @@
 //! Command-line entry point for BOP dataset generation.
+//!
+//! `bop-gen` parses arguments, sets up logging, and reports results; the work
+//! is done by `bop-run`, `bop-pipeline`, and `bop-dataset`. `parse` turns
+//! arguments into a `Command` and `execute` dispatches it to one function per
+//! subcommand. Generation failures map to exit codes in
+//! `bop_run::GenerateError::exit_code`; `tests/exit_codes.rs` pins them all.
+//!
+//! Guides: <https://bobillumine.github.io/bop-dataset-gen/cli.html> (using it)
+//! and <https://bobillumine.github.io/bop-dataset-gen/contributing/run-and-cli.html>
+//! (how it is built).
 
 use std::{
     collections::{BTreeMap, BTreeSet},

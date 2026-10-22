@@ -45,11 +45,15 @@ physics again.
 | `bop-render-blenderproc` | Supervision of the persistent BlenderProc worker process. |
 | `bop-dataset` | On-disk formats: staging, atomic commit, group commit, resume, validation, and snapshot corpora. |
 | `bop-pipeline` | Composition of the stages, serially and in parallel. |
-| `bop-cli` | The `bop-gen` binary: argument parsing, exit codes, logging, and choosing a renderer. |
+| `bop-run` | Choosing a renderer backend and a pipeline for a loaded run; shared by the CLI and the server. |
+| `bop-cli` | The `bop-gen` binary: argument parsing, exit codes, logging. |
+| `bop-server` | The HTTP job server: jobs, assets, storage, authentication. |
+| `xtask` | Repository maintenance, such as writing the configuration schema. |
 
 Dependencies point downward. `bop-core` depends on no other workspace crate.
 `bop-pipeline` is generic over any `Renderer` and does not depend on either
-backend; only `bop-cli` names the concrete renderers.
+backend; `bop-run` is where the concrete renderers are named. The
+[contributor guide](contributing/crates.md) has a chapter per crate.
 
 ## Serial and parallel pipelines
 
