@@ -284,7 +284,8 @@ their types from it.
 | `POST /jobs/<id>/resume` | 202, or 409 unless the job is failed or cancelled. |
 | `GET /jobs/<id>/events` | Server-sent `job` events: the current state, then every state and progress change. |
 | `GET /jobs/<id>/files` | Stored files below `datasets/<id>/`. |
-| `GET /jobs/<id>/files/<path>` | Streams one stored file. |
+| `GET /jobs/<id>/files/<path>` | Streams one stored file. Files below `scenes/` never change and are sent as immutable; other files, and assets, carry an `ETag` and answer a matching `If-None-Match` with 304. |
+| `GET /jobs/<id>/previews/<path>?size=512` | A small image of a frame's `rgb.png`, `depth.exr`, or `instance.png`, scaled to fit `size` (16 to 4096, never enlarged), with depth and instance IDs coloured as the studio colours them. RGB and depth are JPEG, instances PNG. |
 | `POST /jobs/<id>/exports` | `{"format": "dataset" \| "bop", "expires_in_s": 60..604800}`. Returns `{format, url, signed, expires_at_ms, size, file_name}` for a succeeded job's uncompressed tar, packing it first for jobs from earlier versions. |
 | `GET /jobs/<id>/exports/<format>.tar` | Streams a packed export, for storage that cannot sign URLs. |
 
