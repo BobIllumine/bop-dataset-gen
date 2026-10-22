@@ -39,7 +39,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      # No build cache: a restored target/ left stale, partial rustdoc output
+      # that cargo did not rewrite, and the site lost every crate's index page.
       - uses: taiki-e/install-action@v2
         with:
           tool: mdbook@0.5.4
@@ -50,6 +51,15 @@ jobs:
           mkdir -p target/site
           cp -R target/book/. target/site/
           cp -R target/doc target/site/api
+          # Never publish a code reference with missing crates.
+          for crate in bop_assets bop_core bop_dataset bop_gen bop_physics_rapier \
+            bop_pipeline bop_render_api bop_render_blenderproc bop_render_wgpu \
+            bop_run bop_server xtask; do
+            if [ ! -f "target/site/api/$crate/index.html" ]; then
+              echo "::error::rustdoc for $crate is missing"
+              exit 1
+            fi
+          done
           {
             echo '<!doctype html><meta charset="utf-8"><title>bop-dataset-gen code reference</title>'
             echo '<h1>Code reference</h1><ul>'
