@@ -762,3 +762,161 @@ async fn seeding_can_be_turned_off() {
     let app = seeding_app(root.path()).await;
     assert_eq!(asset_paths(&app).await, EXAMPLES);
 }
+
+/// Sends a bodiless request with extra headers.
+async fn fetch_with(
+    app: &Router,
+    uri: &str,
+    headers: &[(header::HeaderName, &str)],
+) -> (StatusCode, header::HeaderMap, Vec<u8>) {
+    let mut request = Request::builder().uri(uri);
+    for (name, value) in headers {
+        request = request.header(name, *value);
+    }
+    let response = app
+        .clone()
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let (parts, body) = response.into_parts();
+    let bytes = to_bytes(body, usize::MAX).await.unwrap();
+    (parts.status, parts.headers, bytes.to_vec())
+}
+
+#[tokio::test]
+async fn stored_files_are_cached_and_revalidated_by_entity_tag() {
+    let root = tempfile::tempdir().unwrap();
+    let app = app(root.path(), None).await;
+    let id = queued_job(&app).await;
+    let store = storage(root.path());
+    for path in ["scenes/1/scene.json", "run.json"] {
+        store
+            .put(&format!("datasets/{id}/{path}"), b"{}".to_vec())
+            .await
+            .unwrap();
+    }
+
+    // Committed scenes never change.
+    let scene = format!("/api/v1/jobs/{id}/files/scenes/1/scene.json");
+    let (status, headers, _) = fetch_with(&app, &scene, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers[header::CACHE_CONTROL],
+        "private, max-age=31536000, immutable"
+    );
+
+    // Other files are revalidated: a matching tag costs no body.
+    let run = format!("/api/v1/jobs/{id}/files/run.json");
+    let (_, headers, body) = fetch_with(&app, &run, &[]).await;
+    assert_eq!(headers[header::CACHE_CONTROL], "private, no-cache");
+    assert_eq!(body, b"{}");
+    let etag = headers[header::ETAG].to_str().unwrap().to_owned();
+    assert!(etag.starts_with('"') && etag.ends_with('"'), "{etag}");
+    let (status, headers, body) = fetch_with(&app, &run, &[(header::IF_NONE_MATCH, &etag)]).await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+    assert_eq!(headers[header::ETAG], etag.as_str());
+    assert!(body.is_empty());
+    let (status, _, body) =
+        fetch_with(&app, &run, &[(header::IF_NONE_MATCH, "\"something else\"")]).await;
+    assert_eq!(
+        (status, body.as_slice()),
+        (StatusCode::OK, b"{}".as_slice())
+    );
+
+    // A replaced asset is noticed.
+    let asset = "/api/v1/assets/cup/cup.glb";
+    let (_, headers, _) = fetch_with(&app, asset, &[]).await;
+    let old = headers[header::ETAG].to_str().unwrap().to_owned();
+    assert_eq!(headers[header::CACHE_CONTROL], "private, no-cache");
+    send(&app, "PUT", asset, Body::from(vec![1_u8; 9])).await;
+    let (status, _, body) = fetch_with(&app, asset, &[(header::IF_NONE_MATCH, &old)]).await;
+    assert_eq!((status, body.len()), (StatusCode::OK, 9));
+}
+
+#[tokio::test]
+async fn frames_have_small_coloured_previews() {
+    let root = tempfile::tempdir().unwrap();
+    let app = app(root.path(), None).await;
+    let id = queued_job(&app).await;
+    let store = storage(root.path());
+    let frame = root.path().join("frame");
+    std::fs::create_dir_all(&frame).unwrap();
+    let (width, height) = (64_u32, 48_u32);
+    let pixels = (width * height) as usize;
+    bop_dataset::RgbFrame::try_new(width, height, vec![200; pixels * 3])
+        .unwrap()
+        .write_png(&frame.join("rgb.png"), bop_core::PngCompression::Fast)
+        .unwrap();
+    // Background on the left quarter, a slope elsewhere.
+    let depth = (0..pixels)
+        .map(|i| {
+            if i % 64 < 16 {
+                0.0
+            } else {
+                0.5 + 0.01 * f32::from(u8::try_from(i % 64).unwrap())
+            }
+        })
+        .collect();
+    bop_dataset::DepthFrame::try_new(width, height, depth)
+        .unwrap()
+        .write_exr(&frame.join("depth.exr"))
+        .unwrap();
+    // Instance 1 on the left half, background on the right.
+    let ids = (0..pixels).map(|i| u16::from(i % 64 < 32)).collect();
+    bop_dataset::InstanceFrame::try_new(width, height, ids)
+        .unwrap()
+        .write_png(&frame.join("instance.png"), bop_core::PngCompression::Fast)
+        .unwrap();
+    for name in ["rgb.png", "depth.exr", "instance.png"] {
+        store
+            .put_file(
+                &format!("datasets/{id}/scenes/7/frames/00001/{name}"),
+                &frame.join(name),
+            )
+            .await
+            .unwrap();
+    }
+    let preview = |name: &str, query: &str| {
+        format!("/api/v1/jobs/{id}/previews/scenes/7/frames/00001/{name}{query}")
+    };
+
+    for (name, content_type) in [
+        ("rgb.png", "image/jpeg"),
+        ("depth.exr", "image/jpeg"),
+        ("instance.png", "image/png"),
+    ] {
+        let (status, headers, body) = fetch_with(&app, &preview(name, "?size=32"), &[]).await;
+        assert_eq!(status, StatusCode::OK, "{name}");
+        assert_eq!(headers[header::CONTENT_TYPE], content_type);
+        assert_eq!(headers[header::CACHE_CONTROL], "private, max-age=86400");
+        let image = image::load_from_memory(&body).unwrap();
+        assert_eq!((image.width(), image.height()), (32, 24), "{name}");
+        // Without a size, a frame smaller than the default keeps its size.
+        let (_, _, body) = fetch_with(&app, &preview(name, ""), &[]).await;
+        let image = image::load_from_memory(&body).unwrap();
+        assert_eq!((image.width(), image.height()), (64, 48), "{name}");
+    }
+
+    // Instance colours are exact and match the studio's.
+    let (_, _, body) = fetch_with(&app, &preview("instance.png", ""), &[]).await;
+    let instance = image::load_from_memory(&body).unwrap().into_rgb8();
+    assert_eq!(instance.get_pixel(0, 0).0, [78, 119, 218]);
+    assert_eq!(instance.get_pixel(63, 47).0, [11, 12, 14]);
+    // Depth background stays dark; JPEG is close, not exact.
+    let (_, _, body) = fetch_with(&app, &preview("depth.exr", ""), &[]).await;
+    let depth = image::load_from_memory(&body).unwrap().into_rgb8();
+    let [r, g, b] = depth.get_pixel(2, 2).0;
+    assert!(r < 30 && g < 30 && b < 30, "{:?}", [r, g, b]);
+
+    for (uri, status) in [
+        (preview("scene.json", ""), StatusCode::BAD_REQUEST),
+        (preview("rgb.png", "?size=8"), StatusCode::BAD_REQUEST),
+        (
+            format!("/api/v1/jobs/{id}/previews/scenes/8/frames/00001/rgb.png"),
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        let (actual, _, _) = fetch_with(&app, &uri, &[]).await;
+        assert_eq!(actual, status, "{uri}");
+    }
+}

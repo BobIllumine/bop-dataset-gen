@@ -178,6 +178,20 @@ impl Storage {
         }
     }
 
+    /// Returns the entity tag of the object at `key`, or `None` when it is
+    /// missing or the store reports none.
+    ///
+    /// # Errors
+    ///
+    /// Returns store failures other than a missing object.
+    pub async fn etag(&self, key: &str) -> Result<Option<String>, StorageError> {
+        match self.store.head(&Path::from(key)).await {
+            Ok(meta) => Ok(meta.e_tag),
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Packs every object below `prefix` whose relative key `keep` accepts into
     /// an uncompressed tar stored at `key`, streaming without a local copy.
     /// Entries are named `<root>/<key relative to prefix>`, in key order.

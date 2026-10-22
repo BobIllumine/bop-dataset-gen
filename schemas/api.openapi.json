@@ -769,6 +769,90 @@
         }
       }
     },
+    "/api/v1/jobs/{id}/previews/{path}": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Downloads a small image of a stored frame: its `rgb.png`, `depth.exr`, or\n`instance.png` scaled to fit `size`, with depth and instance IDs coloured\nas the studio colours them. RGB and depth previews are JPEG, instance\npreviews PNG.",
+        "operationId": "get_job_preview",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Job identifier.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "The frame file's path as `/files` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "size",
+            "in": "query",
+            "description": "Longest edge in pixels, 16 to 4096; default 512. A smaller frame keeps its size.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The preview.",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "format": "int32",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/jobs/{id}/resume": {
       "post": {
         "tags": [
