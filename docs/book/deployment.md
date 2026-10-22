@@ -44,16 +44,16 @@ Released images are published to GitHub Packages, so the machine only needs
 this repository's `deploy/` directory at the release:
 
 ```text
-git clone --branch v0.1.2 https://github.com/BobIllumine/bop-dataset-gen.git
+git clone --branch v0.1.3 https://github.com/BobIllumine/bop-dataset-gen.git
 ```
 
 | Image | |
 | --- | --- |
-| `ghcr.io/bobillumine/bop-server:0.1.2` | linux/amd64, NVIDIA |
-| `ghcr.io/bobillumine/bop-studio:0.1.2` | linux/amd64 and linux/arm64 |
+| `ghcr.io/bobillumine/bop-server:0.1.3` | linux/amd64, NVIDIA |
+| `ghcr.io/bobillumine/bop-studio:0.1.3` | linux/amd64 and linux/arm64 |
 
 To build from source instead, also clone bop-studio next to it
-(`git clone --branch v0.1.2 https://github.com/BobIllumine/bop-studio.git`),
+(`git clone --branch v0.1.3 https://github.com/BobIllumine/bop-studio.git`),
 leave the two `*_IMAGE` variables below unset, and add `--build` in step 6.
 
 ## 3. authentik
@@ -137,8 +137,8 @@ BOP_OIDC_GROUPS=bop-users
 #BOP_API_TOKEN=
 
 # The released images.
-BOP_SERVER_IMAGE=ghcr.io/bobillumine/bop-server:0.1.2
-BOP_STUDIO_IMAGE=ghcr.io/bobillumine/bop-studio:0.1.2
+BOP_SERVER_IMAGE=ghcr.io/bobillumine/bop-server:0.1.3
+BOP_STUDIO_IMAGE=ghcr.io/bobillumine/bop-studio:0.1.3
 ```
 
 Leave `BOP_ALLOW_ANONYMOUS`, `BOP_CORS_ORIGINS` and the `*_BIND` variables

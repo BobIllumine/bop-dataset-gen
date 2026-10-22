@@ -18,7 +18,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    # Set to a published image (e.g. ghcr.io/bobillumine/bop-server:0.1.2) to pull instead of build.
+    # Set to a published image (e.g. ghcr.io/bobillumine/bop-server:0.1.3) to pull instead of build.
     image: ${BOP_SERVER_IMAGE:-bop-server:latest}
     restart: unless-stopped
     # Reaps renderer processes that outlive their parent; the server is not an init.
