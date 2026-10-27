@@ -67,7 +67,7 @@ jobs:
       PUSH: ${{ github.event_name != 'pull_request' }}
       DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE || (vars.DOCKERHUB_USERNAME && format('{0}/bop-server', vars.DOCKERHUB_USERNAME)) || '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # A workflow_run event otherwise checks out the default branch.
           ref: ${{ inputs.tag || github.event.workflow_run.head_sha || github.sha }}
