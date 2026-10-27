@@ -22,7 +22,7 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # rust-toolchain.toml pins the channel and components.
       - run: rustup toolchain install
       - run: cargo fmt --all --check
@@ -41,7 +41,7 @@ jobs:
           - name: reproducible
             args: -p bop-cli -p bop-pipeline -p bop-physics-rapier --all-targets --no-default-features --features bop-cli/reproducible,bop-cli/wgpu,bop-cli/blenderproc,bop-pipeline/reproducible,bop-physics-rapier/reproducible
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
@@ -62,7 +62,7 @@ jobs:
           - name: reproducible
             args: -p bop-cli -p bop-pipeline -p bop-physics-rapier --no-default-features --features bop-cli/reproducible,bop-cli/wgpu,bop-cli/blenderproc,bop-pipeline/reproducible,bop-physics-rapier/reproducible
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
@@ -77,7 +77,7 @@ jobs:
     env:
       RUSTDOCFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --workspace --no-deps --locked
@@ -86,7 +86,7 @@ jobs:
     name: Config schema drift
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: cargo run --locked -p xtask -- schema --check
@@ -95,7 +95,7 @@ jobs:
     name: Developer guide
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@v2
         with:
           tool: mdbook@0.5.4
@@ -105,7 +105,7 @@ jobs:
     name: Dependency policy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories bans licenses sources
@@ -114,7 +114,7 @@ jobs:
     name: Coverage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup toolchain install && rustup component add llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
         with:
@@ -142,7 +142,7 @@ jobs:
       run:
         working-directory: tools/blenderproc-worker
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v6
       - run: uv lock --check
       - run: uvx ruff@0.12.0 check .
@@ -171,7 +171,7 @@ jobs:
       AWS_ACCESS_KEY_ID: bop
       AWS_SECRET_ACCESS_KEY: bop-minio-secret
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Service containers cannot take a command, and MinIO needs `server`.
       - name: Start MinIO and create the bucket
         run: |

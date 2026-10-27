@@ -37,7 +37,7 @@ jobs:
     env:
       RUSTDOCFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup toolchain install
       # No build cache: a restored target/ left stale, partial rustdoc output
       # that cargo did not rewrite, and the site lost every crate's index page.
