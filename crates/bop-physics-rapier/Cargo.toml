@@ -18,7 +18,7 @@ reproducible = ["rapier3d/enhanced-determinism"]
 blake3 = "=1.8.7"
 bop-assets = { path = "../bop-assets" }
 bop-core = { path = "../bop-core" }
-rapier3d = { version = "=0.35.2", default-features = false, features = ["dim3", "f32", "std"] }
+rapier3d = { version = "=0.35.3", default-features = false, features = ["dim3", "f32", "std"] }
 thiserror = "2"
 
 [dev-dependencies]
