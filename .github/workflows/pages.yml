@@ -71,7 +71,7 @@ jobs:
             done
             echo '</ul><p><a href="../">Developer guide</a></p>'
           } > target/site/api/index.html
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: target/site
 
