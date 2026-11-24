@@ -29,7 +29,7 @@ bop-render-api = { path = "../bop-render-api" }
 bop-run = { path = "../bop-run", default-features = false }
 bop-render-wgpu = { path = "../bop-render-wgpu", optional = true }
 bop-render-blenderproc = { path = "../bop-render-blenderproc", optional = true }
-ctrlc = { version = "=3.5.2", features = ["termination"] }
+ctrlc = { version = "=3.5.3", features = ["termination"] }
 serde_json = { version = "1" }
 toml = "1.1.4"
 tracing = "=0.1.44"

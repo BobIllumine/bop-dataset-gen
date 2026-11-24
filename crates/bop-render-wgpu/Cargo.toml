@@ -17,9 +17,9 @@ bop-dataset = { path = "../bop-dataset" }
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.33"
 half = "=2.7.1"
-pollster = "=1.0.1"
+pollster = "=1.0.3"
 thiserror = "2"
-wgpu = { version = "=30.0.1", default-features = false, features = ["std", "wgsl"] }
+wgpu = { version = "=30.0.2", default-features = false, features = ["std", "wgsl"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 wgpu = { version = "=30.0.1", default-features = false, features = ["metal"] }
